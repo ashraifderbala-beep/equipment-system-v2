@@ -271,6 +271,25 @@ function renderLogin(){
     <div style="margin-top:16px;"><button id="loginBtn" style="width:100%">دخول</button></div>
     <div id="loginErr" class="muted" style="color:var(--danger);margin-top:8px;"></div>
   </div></div>`;
+function renderLogin(){
+  const opts = [ADMIN_NAME, WORKSHOP_CAPITAL, WORKSHOP_SUEZ].concat(PROJECT_LOCATIONS);
+  app.innerHTML = `
+  <div class="loginwrap"><div class="loginbox card">
+    <div class="logo">🚜</div>
+    <h2>نظام متابعة ونقل المعدات</h2>
+    <p class="muted">اختر اسم المشروع أو الجهة لتسجيل الدخول، لتوثيق كل عملية باسم من قام بها.</p>
+    <label>اسم المشروع / الورشة / الإدارة</label>
+    <select id="loginSel">
+      <option value="">-- اختر --</option>
+      ${opts.map(o=>`<option value="${esc(o)}">${esc(o)}</option>`).join('')}
+    </select>
+    <div id="adminPassWrap" style="display:none;">
+      <label>كلمة مرور الإدارة</label>
+      <input type="password" id="adminPass" placeholder="أدخل كلمة المرور">
+    </div>
+    <div style="margin-top:16px;"><button id="loginBtn" style="width:100%">دخول</button></div>
+    <div id="loginErr" class="muted" style="color:var(--danger);margin-top:8px;"></div>
+  </div></div>`;
   document.getElementById('loginSel').addEventListener('change', (e)=>{
     document.getElementById('adminPassWrap').style.display = e.target.value===ADMIN_NAME ? '' : 'none';
   });
@@ -279,10 +298,11 @@ function renderLogin(){
     const errBox = document.getElementById('loginErr');
     errBox.textContent = '';
     if(!v){ errBox.textContent = 'يرجى اختيار اسم المشروع'; return; }
-  if(v===ADMIN_NAME){
-        const pass = document.getElementById('adminPass').value;
-        if(pass !== '123456'){ errBox.textContent = 'كلمة المرور غير صحيحة'; return; }
-      }
+    if(v===ADMIN_NAME){
+      const pass = document.getElementById('adminPass').value;
+      const {error} = await sb.auth.signInWithPassword({email:ADMIN_EMAIL, password:pass});
+      if(error){ errBox.textContent = 'كلمة المرور غير صحيحة'; return; }
+    }
     let role='project';
     if(v===ADMIN_NAME) role='admin';
     else if(v===WORKSHOP_CAPITAL || v===WORKSHOP_SUEZ) role='workshop';
@@ -292,7 +312,6 @@ function renderLogin(){
   };
 }
 async function logout(){ try{ await sb.auth.signOut(); }catch(e){} localStorage.removeItem('eq_user'); location.reload(); }
-
 // ---------- MAIN RENDER ----------
 function render(){
   if(!currentUser){ renderLogin(); return; }
