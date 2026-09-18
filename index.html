@@ -6,6 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
 :root{
   --bg:#f5f6f8; --surface:#ffffff; --surface-2:#eef0f3; --border:#dfe3e8;
@@ -107,8 +108,8 @@ const EQUIPMENT_SEED = [{"code": "1/2/001", "name": "كمبروسور هواء",
 
 // ============ إعدادات الاتصال بـ Supabase ============
 // عدّل هذين السطرين ببيانات مشروعك في Supabase (Project Settings > API)
-const SUPABASE_URL = 'https://eiaupsizfxtbksctdbyo.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpYXVwc2l6Znh0YmtzY3RkYnlvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk1OTk2MjQsImV4cCI6MjEwNTE3NTYyNH0.q9UjIxCQmhqEPoX6oT7CWuI1za6lQvB-skoD7uM0rBs';
+const SUPABASE_URL = 'https://YOUR-PROJECT-ID.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
 const ADMIN_EMAIL = 'admin@equipment-system.local'; // أنشئ هذا المستخدم من Supabase Authentication
 // ======================================================
 
@@ -743,8 +744,34 @@ function renderReports(){
   eq.forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
   const topMoved = eq.slice().sort((a,b)=>(b.transferCount||0)-(a.transferCount||0)).slice(0,10).filter(e=>e.transferCount>0);
 
+  // إجمالي أيام التعطل لكل معدة (كل عمليات الإصلاح المكتملة أو الجارية)
+  const downtimeMap = {};
+  tr.filter(t=>t.transferType==='repair' && (t.entryDate||t.approvedAt)).forEach(t=>{
+    const days = daysBetween(t.entryDate||t.approvedAt, t.exitDate||null);
+    downtimeMap[t.equipmentCode] = (downtimeMap[t.equipmentCode]||0) + (days||0);
+  });
+  const topDowntime = Object.entries(downtimeMap).sort((a,b)=>b[1]-a[1]).slice(0,10)
+    .map(([code,days])=>({code, name:(equipmentMap[code]||{}).name || code, days}));
+
+  // اتجاه النقل الشهري (آخر 12 شهراً)
+  const months = [];
+  const now = new Date();
+  for(let i=11;i>=0;i--){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    months.push({key: d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'), label: d.toLocaleDateString('ar-EG',{month:'short',year:'2-digit'})});
+  }
+  const monthlyCounts = months.map(m=> tr.filter(t=>t.requestedAt && t.requestedAt.slice(0,7)===m.key).length );
+
+  // أكثر المشاريع مصدراً لطلبات النقل
+  const fromCounts = {};
+  tr.forEach(t=>{ if(t.fromLocationType==='project') fromCounts[t.fromLocation]=(fromCounts[t.fromLocation]||0)+1; });
+  const topFrom = Object.entries(fromCounts).sort((a,b)=>b[1]-a[1]).slice(0,8);
+
   return `
-  <div class="row noprint" style="margin-bottom:10px;"><button class="secondary" onclick="printReport()">🖨️ طباعة هذا التقرير</button></div>
+  <div class="row noprint" style="margin-bottom:10px;">
+    <button class="secondary" onclick="printReport()">🖨️ طباعة هذا التقرير</button>
+    <button class="secondary" onclick="exportReportExcel()">📊 تصدير إلى Excel</button>
+  </div>
   <div class="grid-stats">
     <div class="stat"><b>${byType.permanent||0}</b><span>عمليات نقل دائم</span></div>
     <div class="stat"><b>${byType.mission||0}</b><span>عمليات مأمورية</span></div>
@@ -752,6 +779,22 @@ function renderReports(){
     <div class="stat"><b>${capitalDur??'—'}</b><span>متوسط أيام الإصلاح - ورشة العاصمة</span></div>
     <div class="stat"><b>${suezDur??'—'}</b><span>متوسط أيام الإصلاح - ورشة السويس</span></div>
   </div>
+
+  <div class="card">
+    <h3>اتجاه عمليات النقل خلال آخر 12 شهراً</h3>
+    <div style="max-height:280px;"><canvas id="chartMonthly"></canvas></div>
+  </div>
+  <div class="two-col">
+    <div class="card">
+      <h3>توزيع أنواع النقل</h3>
+      <div style="max-height:260px;"><canvas id="chartTypes"></canvas></div>
+    </div>
+    <div class="card">
+      <h3>أكثر المشاريع طلباً للنقل</h3>
+      <div style="max-height:260px;"><canvas id="chartTopProjects"></canvas></div>
+    </div>
+  </div>
+
   <div class="card">
     <h3>المعدات الموجودة حالياً داخل الورش (${currentlyInWorkshop.length})</h3>
     <div class="tablewrap"><table><thead><tr><th>الكود</th><th>الاسم</th><th>الورشة</th><th>عدد الأيام منذ الدخول</th></tr></thead><tbody>
@@ -763,6 +806,11 @@ function renderReports(){
     </tbody></table></div>
   </div>
   <div class="card">
+    <h3>أكثر المعدات تعطلاً بسبب الإصلاح (إجمالي الأيام)</h3>
+    ${topDowntime.length? topDowntime.map(d=>`<div style="display:flex;justify-content:space-between;border-bottom:1px solid var(--border);padding:6px 0;"><span>${esc(d.name)} (${esc(d.code)})</span><b>${d.days} يوم</b></div>`).join('') : '<div class="empty">لا توجد بيانات كافية بعد</div>'}
+    <p class="hint">هذا مؤشر مفيد لتحديد المعدات التي يستحق التفكير في استبدالها بدلاً من الاستمرار بإصلاحها.</p>
+  </div>
+  <div class="card">
     <h3>المعدات الأكثر تنقلاً</h3>
     ${topMoved.length? topMoved.map(e=>`<div style="display:flex;justify-content:space-between;border-bottom:1px solid var(--border);padding:6px 0;"><span>${esc(e.name)} (${esc(e.code)})</span><b>${e.transferCount} مرة</b></div>`).join('') : '<div class="empty">لا توجد بيانات كافية بعد</div>'}
   </div>
@@ -772,6 +820,58 @@ function renderReports(){
     ${Object.entries(byProjectCount).sort((a,b)=>b[1]-a[1]).map(([p,c])=>`<tr><td>${esc(p)}</td><td>${c}</td></tr>`).join('')}
     </tbody></table></div>
   </div>`;
+}
+
+let chartInstances = {};
+function destroyCharts(){ Object.values(chartInstances).forEach(c=>{ try{c.destroy();}catch(e){} }); chartInstances={}; }
+function initReportCharts(){
+  destroyCharts();
+  const eq = equipList(); const tr = transferList();
+  const months = [];
+  const now = new Date();
+  for(let i=11;i>=0;i--){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    months.push({key: d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'), label: d.toLocaleDateString('ar-EG',{month:'short',year:'2-digit'})});
+  }
+  const monthlyCounts = months.map(m=> tr.filter(t=>t.requestedAt && t.requestedAt.slice(0,7)===m.key).length );
+  const c1 = document.getElementById('chartMonthly');
+  if(c1) chartInstances.monthly = new Chart(c1, {
+    type:'bar',
+    data:{labels: months.map(m=>m.label), datasets:[{label:'عدد عمليات النقل', data: monthlyCounts, backgroundColor:'#0f6e5f'}]},
+    options:{responsive:true, maintainAspectRatio:false, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true, ticks:{precision:0}}}}
+  });
+
+  const byType = {permanent:0, mission:0, repair:0};
+  tr.forEach(t=> byType[t.transferType] = (byType[t.transferType]||0)+1 );
+  const c2 = document.getElementById('chartTypes');
+  if(c2) chartInstances.types = new Chart(c2, {
+    type:'doughnut',
+    data:{labels:['نقل دائم','مأمورية','نقل للإصلاح'], datasets:[{data:[byType.permanent||0, byType.mission||0, byType.repair||0], backgroundColor:['#0f6e5f','#c17a1f','#b3261e']}]},
+    options:{responsive:true, maintainAspectRatio:false}
+  });
+
+  const fromCounts = {};
+  tr.forEach(t=>{ if(t.fromLocationType==='project') fromCounts[t.fromLocation]=(fromCounts[t.fromLocation]||0)+1; });
+  const topFrom = Object.entries(fromCounts).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  const c3 = document.getElementById('chartTopProjects');
+  if(c3) chartInstances.topProjects = new Chart(c3, {
+    type:'bar',
+    data:{labels: topFrom.map(x=>x[0]), datasets:[{label:'عدد طلبات النقل', data: topFrom.map(x=>x[1]), backgroundColor:'#3fb89a'}]},
+    options:{responsive:true, maintainAspectRatio:false, indexAxis:'y', plugins:{legend:{display:false}}, scales:{x:{beginAtZero:true, ticks:{precision:0}}}}
+  });
+}
+function exportReportExcel(){
+  const eq = equipList(); const tr = transferList();
+  const byProjectCount = {};
+  eq.forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
+  const wb = XLSX.utils.book_new();
+  const eqSheet = eq.map(e=>({الكود:e.code, الاسم:e.name, الماركة:e.brand, الموديل:e.model, الموقع:e.project, الحالة:e.status, 'عدد مرات النقل':e.transferCount||0}));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(eqSheet), 'المعدات');
+  const trSheet = tr.map(t=>({الكود:t.equipmentCode, الاسم:t.equipmentName, النوع:typeLabel(t.transferType), من:t.fromLocation, إلى:t.toLocation, الحالة:t.status, بواسطة:t.requestedBy, التاريخ:fmtDate(t.requestedAt)}));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(trSheet), 'طلبات النقل');
+  const distSheet = Object.entries(byProjectCount).sort((a,b)=>b[1]-a[1]).map(([p,c])=>({الموقع:p, 'عدد المعدات':c}));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(distSheet), 'توزيع المواقع');
+  XLSX.writeFile(wb, 'تقرير_نظام_المعدات_'+new Date().toISOString().slice(0,10)+'.xlsx');
 }
 
 // ---------- ADMIN: MANAGE EQUIPMENT & PROJECTS ----------
@@ -1026,6 +1126,7 @@ async function deleteProject(name){
 
 // ---------- HANDLERS ----------
 function attachHandlers(){
+  if(currentTab==='reports'){ setTimeout(initReportCharts, 0); } else { destroyCharts(); }
   const eqSearch = document.getElementById('eqSearch');
   if(eqSearch){
     fillEquipmentTable();
@@ -1155,6 +1256,7 @@ window.addProject = addProject;
 window.deleteProject = deleteProject;
 window.handleImportFile = handleImportFile;
 window.confirmImport = confirmImport;
+window.exportReportExcel = exportReportExcel;
 </script>
 </body>
 </html>
