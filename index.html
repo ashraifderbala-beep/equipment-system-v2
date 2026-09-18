@@ -210,7 +210,7 @@ function trFromRow(r){
     lastMaintenanceDate:r.last_maintenance_date, lastMaintenanceMeter:r.last_maintenance_meter, lastFilterChanged:r.last_filter_changed,
     accessories:r.accessories, missionEndDate:r.mission_end_date, inspectionFormUrl:r.inspection_form_url,
     entryDate:r.entry_date, exitDate:r.exit_date, workDone:r.work_done, workShouldBeDone:r.work_should_be_done,
-    technicalNotes:r.technical_notes, invoices:r.invoices||[]};
+    technicalNotes:r.technical_notes, invoices:r.invoices||[], labor:r.labor||[], parts:r.parts||[]};
 }
 async function ensureSeed(){
   const {count, error} = await sb.from('equipment').select('*', {count:'exact', head:true});
@@ -355,6 +355,11 @@ function render(){
     </div>
     <nav>${tabs.map(([k,l])=>`<button class="${currentTab===k?'active':''}" onclick="setTab('${k}')">${l}</button>`).join('')}</nav>
     <div id="body">${body}</div>
+    <datalist id="jobRoles">
+      <option value="فني ميكانيكا"><option value="فني كهرباء"><option value="فني هيدروليك">
+      <option value="سمكري"><option value="رسام (دهان)"><option value="رئيس ورشة">
+      <option value="مساعد فني"><option value="فني تكييف">
+    </datalist>
     <footer>نظام داخلي لمتابعة نقل المعدات بين المشاريع والورش</footer>
   `;
   attachHandlers();
@@ -602,6 +607,9 @@ function openTransferDetail(id){
    ${t.workShouldBeDone?`<div><b>ما كان يجب إنجازه:</b> ${esc(t.workShouldBeDone)}</div>`:''}
    ${t.technicalNotes?`<div><b>ملاحظات فنية:</b> ${esc(t.technicalNotes)}</div>`:''}
    ${(t.invoices&&t.invoices.length)? `<div><b>الفواتير:</b> ${t.invoices.map((iv,i)=>`<a href="${iv.url}" target="_blank">فاتورة ${i+1}</a>`).join(' | ')}</div>`:''}
+   ${(t.labor&&t.labor.length)? `<div style="margin-top:8px;"><b>العمالة:</b>${t.labor.map(x=>`<div class="muted">${esc(x.name)} — ${esc(x.role)||'—'} — ${x.hours||0} ساعة × ${x.rate||0} = ${costLine(x.hours,x.rate).toLocaleString()}</div>`).join('')}</div>`:''}
+   ${(t.parts&&t.parts.length)? `<div style="margin-top:8px;"><b>قطع الغيار:</b>${t.parts.map(x=>`<div class="muted">${esc(x.name)} — الكمية ${x.qty||0} × ${x.price||0} = ${costLine2(x.qty,x.price).toLocaleString()}</div>`).join('')}</div>`:''}
+   ${((t.labor&&t.labor.length)||(t.parts&&t.parts.length))? `<div style="margin-top:6px;"><b>إجمالي تكلفة الإصلاح: ${((t.labor||[]).reduce((s,x)=>s+costLine(x.hours,x.rate),0)+(t.parts||[]).reduce((s,x)=>s+costLine2(x.qty,x.price),0)).toLocaleString()}</b></div>`:''}
    ` : ''}
    <div class="row noprint" style="margin-top:12px;"><button class="secondary" onclick="printModal()">🖨️ طباعة هذا التقرير</button></div>
    </div>`;
@@ -668,8 +676,77 @@ function renderWorkshopsOverview(){
   return `<div class="section-title">${WORKSHOP_CAPITAL}</div>${renderWorkshopTab(WORKSHOP_CAPITAL)}
   <div class="section-title">${WORKSHOP_SUEZ}</div>${renderWorkshopTab(WORKSHOP_SUEZ)}`;
 }
+let workEditState = {}; // {transferId: {labor:[{name,role,hours,rate}], parts:[{name,qty,price}]}}
+function ensureWorkState(t){
+  if(!workEditState[t.id]){
+    workEditState[t.id] = {
+      labor: (t.labor||[]).map(x=>({name:x.name||'', role:x.role||'', hours:x.hours||'', rate:x.rate||''})),
+      parts: (t.parts||[]).map(x=>({name:x.name||'', qty:x.qty||'', price:x.price||''}))
+    };
+  }
+  return workEditState[t.id];
+}
+function costLine(hours, rate){ const h=parseFloat(hours)||0, r=parseFloat(rate)||0; return h*r; }
+function costLine2(qty, price){ const q=parseFloat(qty)||0, p=parseFloat(price)||0; return q*p; }
+function calcTotals(state){
+  const laborTotal = state.labor.reduce((s,x)=>s+costLine(x.hours,x.rate),0);
+  const partsTotal = state.parts.reduce((s,x)=>s+costLine2(x.qty,x.price),0);
+  return {laborTotal, partsTotal, grand: laborTotal+partsTotal};
+}
+function renderLaborRows(id){
+  const state = workEditState[id];
+  const box = document.getElementById('laborRows_'+id);
+  if(!box) return;
+  const t = transfersMap[id]; const done = t && t.status!=='in_workshop';
+  if(done){
+    box.innerHTML = state.labor.length ? state.labor.map(row=>`<div class="muted" style="padding:3px 0;">${esc(row.name)} — ${esc(row.role)||'—'} — ${row.hours||0} ساعة × ${row.rate||0} = <b>${costLine(row.hours,row.rate).toLocaleString()}</b></div>`).join('') : '<div class="muted">لا يوجد</div>';
+    updateCostSummary(id); return;
+  }
+  box.innerHTML = state.labor.map((row,i)=>`
+    <div class="row" style="margin-top:6px;">
+      <input placeholder="اسم الفني" value="${esc(row.name)}" onchange="updateLabor('${id}',${i},'name',this.value)">
+      <input placeholder="الوظيفة (فني ميكانيكا، كهربائي...)" list="jobRoles" value="${esc(row.role)}" onchange="updateLabor('${id}',${i},'role',this.value)">
+      <input type="number" min="0" step="0.5" placeholder="عدد الساعات" value="${esc(row.hours)}" onchange="updateLabor('${id}',${i},'hours',this.value)">
+      <input type="number" min="0" step="1" placeholder="تكلفة الساعة" value="${esc(row.rate)}" onchange="updateLabor('${id}',${i},'rate',this.value)">
+      <button class="small danger" style="flex:0 0 auto;" onclick="removeLabor('${id}',${i})">✕</button>
+    </div>`).join('');
+  updateCostSummary(id);
+}
+function renderPartsRows(id){
+  const state = workEditState[id];
+  const box = document.getElementById('partsRows_'+id);
+  if(!box) return;
+  const t = transfersMap[id]; const done = t && t.status!=='in_workshop';
+  if(done){
+    box.innerHTML = state.parts.length ? state.parts.map(row=>`<div class="muted" style="padding:3px 0;">${esc(row.name)} — الكمية ${row.qty||0} × ${row.price||0} = <b>${costLine2(row.qty,row.price).toLocaleString()}</b></div>`).join('') : '<div class="muted">لا يوجد</div>';
+    updateCostSummary(id); return;
+  }
+  box.innerHTML = state.parts.map((row,i)=>`
+    <div class="row" style="margin-top:6px;">
+      <input placeholder="اسم القطعة" value="${esc(row.name)}" onchange="updatePart('${id}',${i},'name',this.value)">
+      <input type="number" min="0" step="1" placeholder="الكمية" value="${esc(row.qty)}" onchange="updatePart('${id}',${i},'qty',this.value)">
+      <input type="number" min="0" step="1" placeholder="سعر الوحدة" value="${esc(row.price)}" onchange="updatePart('${id}',${i},'price',this.value)">
+      <button class="small danger" style="flex:0 0 auto;" onclick="removePart('${id}',${i})">✕</button>
+    </div>`).join('');
+  updateCostSummary(id);
+}
+function updateCostSummary(id){
+  const el = document.getElementById('costSummary_'+id);
+  if(!el) return;
+  const {laborTotal, partsTotal, grand} = calcTotals(workEditState[id]);
+  el.innerHTML = `تكلفة العمالة: <b>${laborTotal.toLocaleString()}</b> | تكلفة القطع: <b>${partsTotal.toLocaleString()}</b> | <b style="color:var(--primary);">الإجمالي: ${grand.toLocaleString()}</b>`;
+}
+function addLaborRow(id){ ensureWorkState(transfersMap[id]).labor.push({name:'',role:'',hours:'',rate:''}); renderLaborRows(id); }
+function removeLabor(id,i){ workEditState[id].labor.splice(i,1); renderLaborRows(id); }
+function updateLabor(id,i,field,val){ workEditState[id].labor[i][field]=val; updateCostSummary(id); }
+function addPartRow(id){ ensureWorkState(transfersMap[id]).parts.push({name:'',qty:'',price:''}); renderPartsRows(id); }
+function removePart(id,i){ workEditState[id].parts.splice(i,1); renderPartsRows(id); }
+function updatePart(id,i,field,val){ workEditState[id].parts[i][field]=val; updateCostSummary(id); }
+
 function renderWorkshopCard(t){
   const done = t.status!=='in_workshop';
+  const state = ensureWorkState(t);
+  const {laborTotal, partsTotal, grand} = calcTotals(state);
   return `<div class="card">
     <div class="top" style="margin-bottom:6px;">
       <div><b>${esc(t.equipmentName)}</b> <span class="muted">(${esc(t.equipmentCode)})</span></div>
@@ -684,7 +761,20 @@ function renderWorkshopCard(t){
     <label>ما تم إنجازه</label><textarea id="wdone_${t.id}" ${done?'disabled':''}>${esc(t.workDone||'')}</textarea>
     <label>ما كان يجب أن يتم</label><textarea id="wshould_${t.id}" ${done?'disabled':''}>${esc(t.workShouldBeDone||'')}</textarea>
     <label>ملاحظات فنية</label><textarea id="wnotes_${t.id}" ${done?'disabled':''}>${esc(t.technicalNotes||'')}</textarea>
-    <label>رفع فاتورة إصلاح</label>
+
+    <div class="section-title">👷 العمالة المشاركة في الإصلاح (للحوافز)</div>
+    <div id="laborRows_${t.id}"></div>
+    ${!done? `<button class="small secondary" style="margin-top:6px;" onclick="addLaborRow('${t.id}')">+ إضافة فني</button>` : ''}
+
+    <div class="section-title">🔩 قطع الغيار المستخدمة</div>
+    <div id="partsRows_${t.id}"></div>
+    ${!done? `<button class="small secondary" style="margin-top:6px;" onclick="addPartRow('${t.id}')">+ إضافة قطعة</button>` : ''}
+
+    <div class="card" style="background:var(--surface-2);margin-top:12px;margin-bottom:0;">
+      <div id="costSummary_${t.id}" style="font-size:14px;"></div>
+    </div>
+
+    <label style="margin-top:14px;">رفع فاتورة إصلاح (اختياري، للمرفقات فقط)</label>
     ${!done? `<input type="file" id="winvoice_${t.id}" accept="image/*,application/pdf">` : ''}
     <div class="muted">${(t.invoices&&t.invoices.length)? t.invoices.map((iv,i)=>`<a href="${iv.url}" target="_blank">فاتورة ${i+1}</a>`).join(' | ') : 'لا توجد فواتير مرفوعة بعد'}</div>
     ${!done? `<div class="row" style="margin-top:10px;">
@@ -693,6 +783,10 @@ function renderWorkshopCard(t){
     </div>` : (t.status==='ready_return' ? '<div class="muted" style="margin-top:8px;">بانتظار موافقة الإدارة على إعادة المعدة للمشروع</div>' : '<div class="muted" style="margin-top:8px;">تم إغلاق الملف وإعادة المعدة</div>')}
   </div>`;
 }
+function initWorkshopCardRows(t){
+  renderLaborRows(t.id);
+  renderPartsRows(t.id);
+}
 async function saveWorkshopReport(id){
   const entryDate = document.getElementById('wentry_'+id).value;
   const exitDate = document.getElementById('wexit_'+id).value;
@@ -700,7 +794,10 @@ async function saveWorkshopReport(id){
   const workShouldBeDone = document.getElementById('wshould_'+id).value.trim();
   const technicalNotes = document.getElementById('wnotes_'+id).value.trim();
   const fileInput = document.getElementById('winvoice_'+id);
-  const patch = {entry_date:entryDate, exit_date:exitDate, work_done:workDone, work_should_be_done:workShouldBeDone, technical_notes:technicalNotes};
+  const state = workEditState[id] || {labor:[], parts:[]};
+  const labor = state.labor.filter(x=>x.name && x.name.trim()).map(x=>({name:x.name.trim(), role:(x.role||'').trim(), hours:parseFloat(x.hours)||0, rate:parseFloat(x.rate)||0}));
+  const parts = state.parts.filter(x=>x.name && x.name.trim()).map(x=>({name:x.name.trim(), qty:parseFloat(x.qty)||0, price:parseFloat(x.price)||0}));
+  const patch = {entry_date:entryDate, exit_date:exitDate, work_done:workDone, work_should_be_done:workShouldBeDone, technical_notes:technicalNotes, labor, parts};
   if(fileInput && fileInput.files[0]){
     try{
       const url = await uploadFile(fileInput.files[0], 'invoices');
@@ -767,6 +864,22 @@ function renderReports(){
   tr.forEach(t=>{ if(t.fromLocationType==='project') fromCounts[t.fromLocation]=(fromCounts[t.fromLocation]||0)+1; });
   const topFrom = Object.entries(fromCounts).sort((a,b)=>b[1]-a[1]).slice(0,8);
 
+  // تقرير حوافز الورشة: تجميع العمالة حسب اسم الفني
+  const workerStats = {};
+  tr.forEach(t=>{
+    (t.labor||[]).forEach(x=>{
+      if(!x.name) return;
+      const key = x.name.trim();
+      if(!workerStats[key]) workerStats[key] = {role:x.role||'', repairs:new Set(), hours:0, cost:0};
+      workerStats[key].role = x.role || workerStats[key].role;
+      workerStats[key].repairs.add(t.id);
+      workerStats[key].hours += parseFloat(x.hours)||0;
+      workerStats[key].cost += costLine(x.hours,x.rate);
+    });
+  });
+  const workerRows = Object.entries(workerStats).map(([name,s])=>({name, role:s.role, repairs:s.repairs.size, hours:s.hours, cost:s.cost})).sort((a,b)=>b.cost-a.cost);
+  const totalRepairCost = tr.reduce((s,t)=> s + (t.labor||[]).reduce((s2,x)=>s2+costLine(x.hours,x.rate),0) + (t.parts||[]).reduce((s2,x)=>s2+costLine2(x.qty,x.price),0), 0);
+
   return `
   <div class="row noprint" style="margin-bottom:10px;">
     <button class="secondary" onclick="printReport()">🖨️ طباعة هذا التقرير</button>
@@ -778,6 +891,16 @@ function renderReports(){
     <div class="stat"><b>${byType.repair||0}</b><span>عمليات نقل للإصلاح</span></div>
     <div class="stat"><b>${capitalDur??'—'}</b><span>متوسط أيام الإصلاح - ورشة العاصمة</span></div>
     <div class="stat"><b>${suezDur??'—'}</b><span>متوسط أيام الإصلاح - ورشة السويس</span></div>
+    <div class="stat"><b>${totalRepairCost.toLocaleString()}</b><span>إجمالي تكلفة الإصلاحات (عمالة + قطع غيار)</span></div>
+  </div>
+
+  <div class="card">
+    <h3>💰 تقرير حوافز الورشة (حسب الفني)</h3>
+    ${workerRows.length? `<div class="tablewrap"><table><thead><tr><th>اسم الفني</th><th>الوظيفة</th><th>عدد الإصلاحات</th><th>إجمالي الساعات</th><th>إجمالي تكلفة العمالة</th></tr></thead><tbody>
+    ${workerRows.map(w=>`<tr><td>${esc(w.name)}</td><td>${esc(w.role)||'—'}</td><td>${w.repairs}</td><td>${w.hours}</td><td>${w.cost.toLocaleString()}</td></tr>`).join('')}
+    </tbody></table></div>
+    <p class="hint">يعتمد هذا التقرير على البيانات التي يسجّلها مهندسو الورش عند كل عملية إصلاح (تبويب "متابعة الورش").</p>`
+    : '<div class="empty">لم يتم تسجيل بيانات عمالة بعد من الورش</div>'}
   </div>
 
   <div class="card">
@@ -864,6 +987,18 @@ function exportReportExcel(){
   const eq = equipList(); const tr = transferList();
   const byProjectCount = {};
   eq.forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
+  const workerStats = {};
+  tr.forEach(t=>{
+    (t.labor||[]).forEach(x=>{
+      if(!x.name) return;
+      const key = x.name.trim();
+      if(!workerStats[key]) workerStats[key] = {role:x.role||'', repairs:new Set(), hours:0, cost:0};
+      workerStats[key].role = x.role || workerStats[key].role;
+      workerStats[key].repairs.add(t.id);
+      workerStats[key].hours += parseFloat(x.hours)||0;
+      workerStats[key].cost += costLine(x.hours,x.rate);
+    });
+  });
   const wb = XLSX.utils.book_new();
   const eqSheet = eq.map(e=>({الكود:e.code, الاسم:e.name, الماركة:e.brand, الموديل:e.model, الموقع:e.project, الحالة:e.status, 'عدد مرات النقل':e.transferCount||0}));
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(eqSheet), 'المعدات');
@@ -871,6 +1006,8 @@ function exportReportExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(trSheet), 'طلبات النقل');
   const distSheet = Object.entries(byProjectCount).sort((a,b)=>b[1]-a[1]).map(([p,c])=>({الموقع:p, 'عدد المعدات':c}));
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(distSheet), 'توزيع المواقع');
+  const workerSheet = Object.entries(workerStats).map(([name,s])=>({'اسم الفني':name, الوظيفة:s.role, 'عدد الإصلاحات':s.repairs.size, 'إجمالي الساعات':s.hours, 'إجمالي التكلفة':s.cost})).sort((a,b)=>b['إجمالي التكلفة']-a['إجمالي التكلفة']);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(workerSheet), 'حوافز الورشة');
   XLSX.writeFile(wb, 'تقرير_نظام_المعدات_'+new Date().toISOString().slice(0,10)+'.xlsx');
 }
 
@@ -1127,6 +1264,10 @@ async function deleteProject(name){
 // ---------- HANDLERS ----------
 function attachHandlers(){
   if(currentTab==='reports'){ setTimeout(initReportCharts, 0); } else { destroyCharts(); }
+  document.querySelectorAll('[id^="laborRows_"]').forEach(el=>{
+    const id = el.id.replace('laborRows_','');
+    if(transfersMap[id]){ ensureWorkState(transfersMap[id]); renderLaborRows(id); renderPartsRows(id); }
+  });
   const eqSearch = document.getElementById('eqSearch');
   if(eqSearch){
     fillEquipmentTable();
@@ -1257,6 +1398,12 @@ window.deleteProject = deleteProject;
 window.handleImportFile = handleImportFile;
 window.confirmImport = confirmImport;
 window.exportReportExcel = exportReportExcel;
+window.addLaborRow = addLaborRow;
+window.removeLabor = removeLabor;
+window.updateLabor = updateLabor;
+window.addPartRow = addPartRow;
+window.removePart = removePart;
+window.updatePart = updatePart;
 </script>
 </body>
 </html>
