@@ -106,8 +106,8 @@ const EQUIPMENT_SEED = [{"code": "1/2/001", "name": "كمبروسور هواء",
 
 // ============ إعدادات الاتصال بـ Supabase ============
 // عدّل هذين السطرين ببيانات مشروعك في Supabase (Project Settings > API)
-const SUPABASE_URL = 'https://eiaupsizfxtbksctdbyo.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpYXVwc2l6Znh0YmtzY3RkYnlvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk1OTk2MjQsImV4cCI6MjEwNTE3NTYyNH0.q9UjIxCQmhqEPoX6oT7CWuI1za6lQvB-skoD7uM0rBs'
+const SUPABASE_URL = 'https://YOUR-PROJECT-ID.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
 const ADMIN_EMAIL = 'admin@equipment-system.local'; // أنشئ هذا المستخدم من Supabase Authentication
 // ======================================================
 
@@ -169,19 +169,29 @@ function uniqueLocations(){
 }
 const ALL_LOCATIONS = uniqueLocations();
 const PROJECT_LOCATIONS = ALL_LOCATIONS.filter(l=>locType(l)==='project');
+let customProjects = []; // مشاريع أُضيفت لاحقاً من الإدارة (جدول projects)
+function allProjectLocations(){
+  return Array.from(new Set([...PROJECT_LOCATIONS, ...customProjects])).sort((a,b)=>a.localeCompare('ar'));
+}
+function allLoginLocations(){
+  return Array.from(new Set([...ALL_LOCATIONS, ...customProjects])).sort((a,b)=>a.localeCompare('ar'));
+}
 
 // ---------- SUPABASE DATA LAYER ----------
 async function fetchAll(){
-  const [eqRes, trRes] = await Promise.all([
+  const [eqRes, trRes, prRes] = await Promise.all([
     sb.from('equipment').select('*'),
-    sb.from('transfers').select('*').order('requested_at',{ascending:false})
+    sb.from('transfers').select('*').order('requested_at',{ascending:false}),
+    sb.from('projects').select('*')
   ]);
   if(eqRes.error) console.error(eqRes.error);
   if(trRes.error) console.error(trRes.error);
+  if(prRes.error) console.warn('projects table not found yet - run migration_2 sql', prRes.error);
   equipmentMap = {};
   (eqRes.data||[]).forEach(r=>{ equipmentMap[r.code] = eqFromRow(r); });
   transfersMap = {};
   (trRes.data||[]).forEach(r=>{ transfersMap[r.id] = trFromRow(r); });
+  customProjects = (prRes.data||[]).map(r=>r.name);
 }
 function eqFromRow(r){
   return {id:r.code, code:r.code, name:r.name, brand:r.brand, model:r.model, category:r.category, year:r.year,
@@ -214,11 +224,19 @@ async function ensureSeed(){
     const {error:e2} = await sb.from('equipment').upsert(chunk, {onConflict:'code'});
     if(e2) console.error(e2);
   }
+  try{
+    const {count} = await sb.from('projects').select('*', {count:'exact', head:true});
+    if(!count){
+      const projRows = PROJECT_LOCATIONS.map(name=>({name}));
+      await sb.from('projects').upsert(projRows, {onConflict:'name'});
+    }
+  }catch(e){ console.warn('projects table missing - run migration_2 sql', e); }
 }
 function subscribeRealtime(){
   sb.channel('eq-changes')
     .on('postgres_changes', {event:'*', schema:'public', table:'equipment'}, async ()=>{ await fetchAll(); render(); })
     .on('postgres_changes', {event:'*', schema:'public', table:'transfers'}, async ()=>{ await fetchAll(); render(); })
+    .on('postgres_changes', {event:'*', schema:'public', table:'projects'}, async ()=>{ await fetchAll(); render(); })
     .subscribe();
 }
 async function uploadFile(file, prefix){
@@ -238,9 +256,17 @@ async function init(){
     app.innerHTML = '<div class="card empty">تعذر تهيئة الاتصال بقاعدة البيانات. تأكد من ضبط SUPABASE_URL و SUPABASE_ANON_KEY في أعلى الملف.</div>';
     return;
   }
-  if(!currentUser){ renderLogin(); return; }
+  if(!currentUser){
+    try{
+      const {data} = await sb.from('projects').select('*');
+      customProjects = (data||[]).map(r=>r.name);
+    }catch(e){ /* projects table may not exist yet - fine */ }
+    renderLogin();
+    return;
+  }
   app.innerHTML = '<div class="empty">جارِ تحميل البيانات...</div>';
   try{
+    try{ await ensureSeed(); }catch(seedErr){ console.warn('seed skipped', seedErr); }
     await fetchAll();
     subscribeRealtime();
     render();
@@ -253,7 +279,7 @@ init();
 
 // ---------- LOGIN ----------
 function renderLogin(){
-  const opts = [ADMIN_NAME, WORKSHOP_CAPITAL, WORKSHOP_SUEZ].concat(PROJECT_LOCATIONS);
+  const opts = [ADMIN_NAME, WORKSHOP_CAPITAL, WORKSHOP_SUEZ].concat(allProjectLocations());
   app.innerHTML = `
   <div class="loginwrap"><div class="loginbox card">
     <div class="logo">🚜</div>
@@ -305,6 +331,7 @@ function render(){
   if(role==='workshop') tabs.push(['workshop', 'ورشتي: '+currentUser.name]);
   if(role==='admin') tabs.push(['workshops','متابعة الورش']);
   if(role==='admin') tabs.push(['reports','تقارير الإدارة']);
+  if(role==='admin') tabs.push(['manage','إدارة المعدات والمشاريع']);
 
   let body = '';
   try{
@@ -316,6 +343,7 @@ function render(){
     else if(currentTab==='workshop') body = renderWorkshopTab(currentUser.name);
     else if(currentTab==='workshops') body = renderWorkshopsOverview();
     else if(currentTab==='reports') body = renderReports();
+    else if(currentTab==='manage') body = renderManage();
   }catch(e){ console.error(e); body = '<div class="card">حدث خطأ في عرض هذه الصفحة.</div>'; }
 
   app.innerHTML = `
@@ -380,7 +408,7 @@ function renderEquipmentList(){
   <div class="card noprint">
     <div class="row">
       <input id="eqSearch" placeholder="بحث بالكود أو الاسم...">
-      <select id="eqProjFilter"><option value="">كل المواقع</option>${ALL_LOCATIONS.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('')}</select>
+      <select id="eqProjFilter"><option value="">كل المواقع</option>${allLoginLocations().map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('')}</select>
       <select id="eqStatusFilter"><option value="">كل الحالات</option>${Array.from(new Set(eq.map(e=>e.status))).filter(Boolean).map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select>
     </div>
   </div>
@@ -408,7 +436,12 @@ function fillEquipmentTable(){
       <td>${esc(e.project)} <div class="muted">${locLabel(e.locationType)}</div></td>
       <td><span class="badge ${statusBadgeClass(e.status)}">${esc(e.status)}</span></td>
       <td>${e.transferCount||0}</td>
-      <td><button class="small secondary noprint" onclick="openEquipmentDetail('${esc(e.code)}')">التفاصيل والسجل</button></td>
+      <td class="noprint">
+        <button class="small secondary" onclick="openEquipmentDetail('${esc(e.code)}')">التفاصيل والسجل</button>
+        ${currentUser.role==='admin' ? `
+        <button class="small secondary" onclick="openEditEquipment('${esc(e.code)}')">تعديل</button>
+        <button class="small danger" onclick="deleteEquipment('${esc(e.code)}')">حذف</button>` : ''}
+      </td>
     </tr>`).join('') || `<tr><td colspan="7" class="empty">لا توجد نتائج</td></tr>`;
 }
 
@@ -515,7 +548,7 @@ function renderDestOptions(type){
     </select>
     <div id="ntExternalWrap" style="display:none;"><label>اسم الورشة الخارجية</label><input id="ntExternalName" placeholder="اسم الورشة"></div>`;
   }
-  let opts = `<option value="">-- اختر المشروع --</option>` + PROJECT_LOCATIONS.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('');
+  let opts = `<option value="">-- اختر المشروع --</option>` + allProjectLocations().map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('');
   let extra = type==='mission' ? `<label>تاريخ العودة المتوقع</label><input type="date" id="ntMissionEnd">` : '';
   return `<label>المشروع المستقبل <span class="req">*</span></label><select id="ntDest">${opts}</select>${extra}`;
 }
@@ -740,6 +773,160 @@ function renderReports(){
   </div>`;
 }
 
+// ---------- ADMIN: MANAGE EQUIPMENT & PROJECTS ----------
+function renderManage(){
+  const allLocs = [WORKSHOP_CAPITAL, WORKSHOP_SUEZ].concat(allProjectLocations());
+  return `
+  <div class="card">
+    <h3>إضافة معدة جديدة</h3>
+    <div class="two-col">
+      <div><label>كود المعدة <span class="req">*</span></label><input id="addCode" placeholder="مثال: 1/2/099"></div>
+      <div><label>اسم المعدة <span class="req">*</span></label><input id="addName" placeholder="مثال: كمبروسور هواء"></div>
+    </div>
+    <div class="two-col">
+      <div><label>الماركة</label><input id="addBrand"></div>
+      <div><label>الموديل</label><input id="addModel"></div>
+    </div>
+    <div class="two-col">
+      <div><label>سنة الصنع</label><input id="addYear"></div>
+      <div><label>رقم الرخصة</label><input id="addLicense"></div>
+    </div>
+    <div class="two-col">
+      <div><label>الموقع الحالي <span class="req">*</span></label>
+        <select id="addProject">${allLocs.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('')}</select>
+      </div>
+      <div><label>الحالة</label>
+        <select id="addStatus"><option value="Working">Working</option><option value="Ready">Ready</option><option value="Under Repair">Under Repair</option><option value="Scrap">Scrap</option></select>
+      </div>
+    </div>
+    <div class="two-col">
+      <div><label>رقم الشاسيه</label><input id="addChassis"></div>
+      <div><label>رقم الموتور</label><input id="addEng"></div>
+    </div>
+    <label>اسم السائق</label><input id="addDriver">
+    <div style="margin-top:12px;"><button onclick="addEquipment()">إضافة المعدة</button></div>
+  </div>
+
+  <div class="card">
+    <h3>إضافة مشروع / موقع جديد</h3>
+    <div class="row">
+      <input id="newProjName" placeholder="اسم المشروع الجديد">
+      <button onclick="addProject()" style="flex:0 0 auto;">إضافة</button>
+    </div>
+    <div class="section-title">قائمة المشاريع الحالية</div>
+    <div>${allProjectLocations().map(p=>`<span class="chip" style="display:inline-flex;align-items:center;gap:6px;">${esc(p)} <button class="small danger" style="padding:1px 7px;" onclick="deleteProject('${esc(p)}')">✕</button></span>`).join(' ') || '<span class="muted">لا توجد مشاريع مضافة يدوياً بعد</span>'}</div>
+    <p class="hint">حذف مشروع من هنا يزيله فقط من قائمة الاختيار عند إنشاء طلب نقل جديد، ولا يحذف أي معدات موجودة به بالفعل.</p>
+  </div>
+
+  <div class="card">
+    <h3>تعديل أو حذف معدة موجودة</h3>
+    <p class="muted">من تبويب "المعدات" اضغط زر "تعديل" أو "حذف" بجانب أي معدة.</p>
+  </div>`;
+}
+async function addEquipment(){
+  const code = document.getElementById('addCode').value.trim();
+  const name = document.getElementById('addName').value.trim();
+  if(!code || !name){ alert('كود المعدة واسمها إلزاميان'); return; }
+  const project = document.getElementById('addProject').value;
+  const payload = {
+    code, name,
+    brand: document.getElementById('addBrand').value.trim(),
+    model: document.getElementById('addModel').value.trim(),
+    year: document.getElementById('addYear').value.trim(),
+    license: document.getElementById('addLicense').value.trim(),
+    project, location_type: locType(project),
+    status: document.getElementById('addStatus').value,
+    chassis: document.getElementById('addChassis').value.trim(),
+    eng: document.getElementById('addEng').value.trim(),
+    driver: document.getElementById('addDriver').value.trim(),
+    transfer_count: 0
+  };
+  const {error} = await sb.from('equipment').insert(payload);
+  if(error){ alert('حدث خطأ: '+error.message+ (error.message.includes('duplicate')?' (كود المعدة مستخدم من قبل)':'')); return; }
+  alert('تمت إضافة المعدة بنجاح');
+  await fetchAll(); render();
+}
+function openEditEquipment(code){
+  const e = equipmentMap[code]; if(!e) return;
+  const allLocs = [WORKSHOP_CAPITAL, WORKSHOP_SUEZ].concat(allProjectLocations());
+  const modal = document.createElement('div'); modal.className='modal-bg';
+  modal.innerHTML = `<div class="modal"><button class="closebtn" onclick="this.closest('.modal-bg').remove()">✕</button>
+    <h2>تعديل: ${esc(e.name)}</h2>
+    <div class="two-col">
+      <div><label>اسم المعدة</label><input id="editName" value="${esc(e.name)}"></div>
+      <div><label>الماركة</label><input id="editBrand" value="${esc(e.brand||'')}"></div>
+    </div>
+    <div class="two-col">
+      <div><label>الموديل</label><input id="editModel" value="${esc(e.model||'')}"></div>
+      <div><label>سنة الصنع</label><input id="editYear" value="${esc(e.year||'')}"></div>
+    </div>
+    <div class="two-col">
+      <div><label>الموقع الحالي</label>
+        <select id="editProject">${allLocs.map(l=>`<option value="${esc(l)}" ${l===e.project?'selected':''}>${esc(l)}</option>`).join('')}</select>
+      </div>
+      <div><label>الحالة</label>
+        <select id="editStatus">
+          ${['Working','Ready','Under Repair','تحت الإصلاح','Scrap'].map(s=>`<option value="${esc(s)}" ${s===e.status?'selected':''}>${esc(s)}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="two-col">
+      <div><label>رقم الشاسيه</label><input id="editChassis" value="${esc(e.chassis||'')}"></div>
+      <div><label>رقم الموتور</label><input id="editEng" value="${esc(e.eng||'')}"></div>
+    </div>
+    <label>اسم السائق</label><input id="editDriver" value="${esc(e.driver||'')}">
+    <p class="hint">تغيير الموقع هنا مباشر (بدون طلب نقل رسمي) ويُستخدم لتصحيح الأخطاء فقط، وليس بديلاً عن نظام طلبات النقل.</p>
+    <div class="row" style="margin-top:12px;">
+      <button onclick="saveEditEquipment('${esc(code)}', this)">حفظ التعديلات</button>
+      <button class="secondary" onclick="this.closest('.modal-bg').remove()">إلغاء</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+async function saveEditEquipment(code, btn){
+  const patch = {
+    name: document.getElementById('editName').value.trim(),
+    brand: document.getElementById('editBrand').value.trim(),
+    model: document.getElementById('editModel').value.trim(),
+    year: document.getElementById('editYear').value.trim(),
+    project: document.getElementById('editProject').value,
+    location_type: locType(document.getElementById('editProject').value),
+    status: document.getElementById('editStatus').value,
+    chassis: document.getElementById('editChassis').value.trim(),
+    eng: document.getElementById('editEng').value.trim(),
+    driver: document.getElementById('editDriver').value.trim()
+  };
+  const {error} = await sb.from('equipment').update(patch).eq('code', code);
+  if(error){ alert('حدث خطأ: '+error.message); return; }
+  btn.closest('.modal-bg').remove();
+  await fetchAll(); render();
+}
+async function deleteEquipment(code){
+  if(!confirm('هل أنت متأكد من حذف هذه المعدة نهائياً؟ لا يمكن التراجع عن هذا الإجراء.')) return;
+  const {error} = await sb.from('equipment').delete().eq('code', code);
+  if(error){
+    if(error.message.includes('foreign key') || error.message.includes('violates')){
+      alert('لا يمكن حذف هذه المعدة لأن لها سجل نقل سابق مرتبط بها. يمكنك بدلاً من ذلك تغيير حالتها إلى "Scrap" من زر تعديل.');
+    } else alert('حدث خطأ: '+error.message);
+    return;
+  }
+  await fetchAll(); render();
+}
+async function addProject(){
+  const name = document.getElementById('newProjName').value.trim();
+  if(!name){ alert('يرجى كتابة اسم المشروع'); return; }
+  const {error} = await sb.from('projects').upsert({name}, {onConflict:'name'});
+  if(error){ alert('حدث خطأ: '+error.message); return; }
+  document.getElementById('newProjName').value='';
+  await fetchAll(); render();
+}
+async function deleteProject(name){
+  if(!confirm('حذف "'+name+'" من قائمة المشاريع؟')) return;
+  const {error} = await sb.from('projects').delete().eq('name', name);
+  if(error){ alert('حدث خطأ: '+error.message); return; }
+  await fetchAll(); render();
+}
+
 // ---------- HANDLERS ----------
 function attachHandlers(){
   const eqSearch = document.getElementById('eqSearch');
@@ -863,6 +1050,12 @@ window.saveWorkshopReport = saveWorkshopReport;
 window.finishRepair = finishRepair;
 window.printModal = printModal;
 window.printReport = printReport;
+window.addEquipment = addEquipment;
+window.openEditEquipment = openEditEquipment;
+window.saveEditEquipment = saveEditEquipment;
+window.deleteEquipment = deleteEquipment;
+window.addProject = addProject;
+window.deleteProject = deleteProject;
 </script>
 </body>
 </html>
