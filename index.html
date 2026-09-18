@@ -5,6 +5,7 @@
 <title>نظام متابعة ونقل المعدات</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 :root{
   --bg:#f5f6f8; --surface:#ffffff; --surface-2:#eef0f3; --border:#dfe3e8;
@@ -778,6 +779,14 @@ function renderManage(){
   const allLocs = [WORKSHOP_CAPITAL, WORKSHOP_SUEZ].concat(allProjectLocations());
   return `
   <div class="card">
+    <h3>📥 استيراد معدات من ملف Excel</h3>
+    <p class="muted">يقبل نفس تنسيق ملف "قاعدة بيانات المعدات" الأصلي. سيتم تحديث المعدات الموجودة (بنفس الكود) وإضافة الجديدة، وإضافة أي مشاريع جديدة تلقائياً لقائمة المشاريع.</p>
+    <input type="file" id="importFile" accept=".xlsx,.xls">
+    <div style="margin-top:10px;"><button class="secondary" onclick="handleImportFile()">معاينة الملف</button></div>
+    <div id="importPreview"></div>
+  </div>
+
+  <div class="card">
     <h3>إضافة معدة جديدة</h3>
     <div class="two-col">
       <div><label>كود المعدة <span class="req">*</span></label><input id="addCode" placeholder="مثال: 1/2/099"></div>
@@ -823,6 +832,94 @@ function renderManage(){
     <p class="muted">من تبويب "المعدات" اضغط زر "تعديل" أو "حذف" بجانب أي معدة.</p>
   </div>`;
 }
+// ---------- EXCEL IMPORT ----------
+let pendingImportRows = null;
+function findHeaderRow(rows){
+  for(let r=0;r<Math.min(rows.length,15);r++){
+    const row = rows[r]||[];
+    if(row.some(c=>String(c||'').trim()==='Equipment Code')) return r;
+  }
+  return -1;
+}
+function handleImportFile(){
+  const input = document.getElementById('importFile');
+  const file = input.files[0];
+  const prevBox = document.getElementById('importPreview');
+  if(!file){ alert('يرجى اختيار ملف أولاً'); return; }
+  prevBox.innerHTML = '<div class="muted" style="margin-top:10px;">جارِ قراءة الملف...</div>';
+  const reader = new FileReader();
+  reader.onload = (e)=>{
+    try{
+      const wb = XLSX.read(new Uint8Array(e.target.result), {type:'array'});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, {header:1, raw:false, defval:''});
+      const hIdx = findHeaderRow(rows);
+      if(hIdx===-1){ prevBox.innerHTML = '<div class="muted" style="color:var(--danger);margin-top:10px;">تعذر التعرف على تنسيق الملف (لم يتم إيجاد عمود "Equipment Code").</div>'; return; }
+      const headers = rows[hIdx].map(h=>String(h||'').trim());
+      const col = (name)=>headers.indexOf(name);
+      const idx = {
+        code: col('Equipment Code'), name: col('Equipment Name'), brand: col('Equipment Type'),
+        model: col('Equipment Model'), category: col('Plant Type'), year: col('Manfacture Year'),
+        license: col('License No.'), project: col('Project Name'), status: col('Status'),
+        chassis: col('Chaiss No.'), eng: col('Eng No.'), driver: col('Driver Name')
+      };
+      const g = (row, key)=> idx[key]>-1 ? String(row[idx[key]]||'').trim() : '';
+      const out = [];
+      for(let r=hIdx+1; r<rows.length; r++){
+        const row = rows[r]; if(!row) continue;
+        const code = g(row,'code'), name = g(row,'name');
+        if(!code && !name) continue;
+        out.push({
+          code: code || ('NOCODE-'+r), name, brand:g(row,'brand'), model:g(row,'model'),
+          category:g(row,'category'), year:g(row,'year'), license:g(row,'license'),
+          project:g(row,'project') || 'غير محدد', status:g(row,'status') || 'Working',
+          chassis:g(row,'chassis'), eng:g(row,'eng'), driver:g(row,'driver')
+        });
+      }
+      pendingImportRows = out;
+      const newProjects = Array.from(new Set(out.map(r=>r.project))).filter(p=>p && !allLoginLocations().includes(p) && locType(p)==='project');
+      prevBox.innerHTML = `
+        <div class="card" style="background:var(--surface-2);margin-top:10px;">
+          <div><b>${out.length}</b> معدة تم العثور عليها في الملف وجاهزة للاستيراد.</div>
+          ${newProjects.length? `<div class="muted" style="margin-top:6px;">مشاريع جديدة سيتم إضافتها تلقائياً: ${newProjects.map(esc).join('، ')}</div>` : ''}
+          <div style="margin-top:10px;"><button onclick="confirmImport()">✅ تأكيد الاستيراد الآن</button></div>
+        </div>`;
+    }catch(err){
+      console.error(err);
+      prevBox.innerHTML = '<div class="muted" style="color:var(--danger);margin-top:10px;">حدث خطأ أثناء قراءة الملف: '+err.message+'</div>';
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+async function confirmImport(){
+  if(!pendingImportRows || !pendingImportRows.length){ alert('لا توجد بيانات جاهزة للاستيراد'); return; }
+  const prevBox = document.getElementById('importPreview');
+  prevBox.innerHTML = '<div class="muted" style="margin-top:10px;">جارِ الاستيراد... قد يستغرق دقيقة حسب عدد المعدات.</div>';
+  try{
+    const rows = pendingImportRows.map(item=>({
+      code:item.code, name:item.name, brand:item.brand, model:item.model, category:item.category,
+      year:item.year, license:item.license, project:item.project, location_type: locType(item.project),
+      status:item.status, chassis:item.chassis, eng:item.eng, driver:item.driver
+    }));
+    for(let i=0;i<rows.length;i+=200){
+      const chunk = rows.slice(i,i+200);
+      const {error} = await sb.from('equipment').upsert(chunk, {onConflict:'code'});
+      if(error) throw error;
+    }
+    const newProjects = Array.from(new Set(rows.map(r=>r.project))).filter(p=>p && locType(p)==='project');
+    if(newProjects.length){
+      await sb.from('projects').upsert(newProjects.map(name=>({name})), {onConflict:'name'});
+    }
+    pendingImportRows = null;
+    await fetchAll();
+    prevBox.innerHTML = '<div class="muted" style="color:var(--ok);margin-top:10px;">✅ تم الاستيراد بنجاح.</div>';
+    render();
+  }catch(err){
+    console.error(err);
+    prevBox.innerHTML = '<div class="muted" style="color:var(--danger);margin-top:10px;">حدث خطأ أثناء الاستيراد: '+err.message+'</div>';
+  }
+}
+
 async function addEquipment(){
   const code = document.getElementById('addCode').value.trim();
   const name = document.getElementById('addName').value.trim();
@@ -1056,6 +1153,8 @@ window.saveEditEquipment = saveEditEquipment;
 window.deleteEquipment = deleteEquipment;
 window.addProject = addProject;
 window.deleteProject = deleteProject;
+window.handleImportFile = handleImportFile;
+window.confirmImport = confirmImport;
 </script>
 </body>
 </html>
