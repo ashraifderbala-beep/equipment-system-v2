@@ -210,7 +210,8 @@ function trFromRow(r){
     lastMaintenanceDate:r.last_maintenance_date, lastMaintenanceMeter:r.last_maintenance_meter, lastFilterChanged:r.last_filter_changed,
     accessories:r.accessories, missionEndDate:r.mission_end_date, inspectionFormUrl:r.inspection_form_url,
     entryDate:r.entry_date, exitDate:r.exit_date, workDone:r.work_done, workShouldBeDone:r.work_should_be_done,
-    technicalNotes:r.technical_notes, invoices:r.invoices||[], labor:r.labor||[], parts:r.parts||[]};
+    technicalNotes:r.technical_notes, invoices:r.invoices||[], labor:r.labor||[], parts:r.parts||[],
+    reportLocked:r.report_locked||false, lockedBy:r.locked_by, lockedAt:r.locked_at};
 }
 async function ensureSeed(){
   const {count, error} = await sb.from('equipment').select('*', {count:'exact', head:true});
@@ -610,6 +611,9 @@ function openTransferDetail(id){
    ${(t.labor&&t.labor.length)? `<div style="margin-top:8px;"><b>العمالة:</b>${t.labor.map(x=>`<div class="muted">${esc(x.name)} — ${esc(x.role)||'—'} — ${x.hours||0} ساعة × ${x.rate||0} = ${costLine(x.hours,x.rate).toLocaleString()}</div>`).join('')}</div>`:''}
    ${(t.parts&&t.parts.length)? `<div style="margin-top:8px;"><b>قطع الغيار:</b>${t.parts.map(x=>`<div class="muted">${esc(x.name)} — الكمية ${x.qty||0} × ${x.price||0} = ${costLine2(x.qty,x.price).toLocaleString()}</div>`).join('')}</div>`:''}
    ${((t.labor&&t.labor.length)||(t.parts&&t.parts.length))? `<div style="margin-top:6px;"><b>إجمالي تكلفة الإصلاح: ${((t.labor||[]).reduce((s,x)=>s+costLine(x.hours,x.rate),0)+(t.parts||[]).reduce((s,x)=>s+costLine2(x.qty,x.price),0)).toLocaleString()}</b></div>`:''}
+   ${t.reportLocked? `<div class="card" style="background:var(--surface-2);margin-top:10px;">🔒 تقرير هذه المعدة معتمد نهائياً بواسطة ${esc(t.lockedBy)} في ${fmtDateTime(t.lockedAt)} — لا يمكن تعديل بيانات العمالة أو القطع بعد الآن.
+     ${currentUser.role==='admin' ? `<div class="row noprint" style="margin-top:8px;"><button class="secondary small" onclick="unlockReport('${t.id}')">فتح القفل للتعديل (للإدارة فقط)</button></div>` : ''}
+   </div>` : ''}
    ` : ''}
    <div class="row noprint" style="margin-top:12px;"><button class="secondary" onclick="printModal()">🖨️ طباعة هذا التقرير</button></div>
    </div>`;
@@ -638,6 +642,13 @@ function renderApprovals(){
       </div>
     </div>`).join('');
 }
+async function unlockReport(id){
+  if(!confirm('فتح القفل يسمح بتعديل بيانات العمالة والقطع لهذا التقرير مرة أخرى. متابعة؟')) return;
+  const {error} = await sb.from('transfers').update({report_locked:false}).eq('id', id);
+  if(error){ alert('حدث خطأ: '+error.message); return; }
+  await fetchAll(); render();
+  document.querySelectorAll('.modal-bg').forEach(m=>m.remove());
+}
 async function decideTransfer(id, approve){
   const t = transfersMap[id]; if(!t) return;
   const notes = document.getElementById('notes_'+id)?.value.trim() || '';
@@ -660,7 +671,14 @@ async function decideTransfer(id, approve){
   }).eq('code', t.equipmentCode);
   if(e1){ alert('تعذر تحديث بيانات المعدة (تأكد من تسجيل الدخول كإدارة): '+e1.message); return; }
   const newTrStatus = isReturn ? 'completed' : (t.transferType==='repair' ? 'in_workshop' : 'approved');
-  const {error:e2} = await sb.from('transfers').update({status:newTrStatus, approved_by: currentUser.name, approved_at:new Date().toISOString(), approval_notes:notes}).eq('id', id);
+  const trPatch = {status:newTrStatus, approved_by: currentUser.name, approved_at:new Date().toISOString(), approval_notes:notes};
+  if(isReturn){
+    // اعتماد نهائي لإعادة المعدة = قفل تقرير الورشة نهائياً (يحمي بيانات العمالة والحوافز من أي تعديل لاحق)
+    trPatch.report_locked = true;
+    trPatch.locked_by = currentUser.name;
+    trPatch.locked_at = new Date().toISOString();
+  }
+  const {error:e2} = await sb.from('transfers').update(trPatch).eq('id', id);
   if(e2){ alert('حدث خطأ: '+e2.message); return; }
   await fetchAll(); render();
 }
@@ -688,6 +706,11 @@ function ensureWorkState(t){
 }
 function costLine(hours, rate){ const h=parseFloat(hours)||0, r=parseFloat(rate)||0; return h*r; }
 function costLine2(qty, price){ const q=parseFloat(qty)||0, p=parseFloat(price)||0; return q*p; }
+function isWorkshopEditLocked(t){
+  if(t.status==='in_workshop') return false;
+  if(t.status==='completed') return !!t.reportLocked; // مقفول فقط لو تم الاعتماد النهائي فعلياً
+  return true; // ready_return أو غيرها: بانتظار قرار الإدارة، غير قابل للتعديل من الورشة
+}
 function calcTotals(state){
   const laborTotal = state.labor.reduce((s,x)=>s+costLine(x.hours,x.rate),0);
   const partsTotal = state.parts.reduce((s,x)=>s+costLine2(x.qty,x.price),0);
@@ -697,7 +720,7 @@ function renderLaborRows(id){
   const state = workEditState[id];
   const box = document.getElementById('laborRows_'+id);
   if(!box) return;
-  const t = transfersMap[id]; const done = t && t.status!=='in_workshop';
+  const t = transfersMap[id]; const done = t && isWorkshopEditLocked(t);
   if(done){
     box.innerHTML = state.labor.length ? state.labor.map(row=>`<div class="muted" style="padding:3px 0;">${esc(row.name)} — ${esc(row.role)||'—'} — ${row.hours||0} ساعة × ${row.rate||0} = <b>${costLine(row.hours,row.rate).toLocaleString()}</b></div>`).join('') : '<div class="muted">لا يوجد</div>';
     updateCostSummary(id); return;
@@ -716,7 +739,7 @@ function renderPartsRows(id){
   const state = workEditState[id];
   const box = document.getElementById('partsRows_'+id);
   if(!box) return;
-  const t = transfersMap[id]; const done = t && t.status!=='in_workshop';
+  const t = transfersMap[id]; const done = t && isWorkshopEditLocked(t);
   if(done){
     box.innerHTML = state.parts.length ? state.parts.map(row=>`<div class="muted" style="padding:3px 0;">${esc(row.name)} — الكمية ${row.qty||0} × ${row.price||0} = <b>${costLine2(row.qty,row.price).toLocaleString()}</b></div>`).join('') : '<div class="muted">لا يوجد</div>';
     updateCostSummary(id); return;
@@ -744,7 +767,7 @@ function removePart(id,i){ workEditState[id].parts.splice(i,1); renderPartsRows(
 function updatePart(id,i,field,val){ workEditState[id].parts[i][field]=val; updateCostSummary(id); }
 
 function renderWorkshopCard(t){
-  const done = t.status!=='in_workshop';
+  const done = isWorkshopEditLocked(t);
   const state = ensureWorkState(t);
   const {laborTotal, partsTotal, grand} = calcTotals(state);
   return `<div class="card">
@@ -779,8 +802,8 @@ function renderWorkshopCard(t){
     <div class="muted">${(t.invoices&&t.invoices.length)? t.invoices.map((iv,i)=>`<a href="${iv.url}" target="_blank">فاتورة ${i+1}</a>`).join(' | ') : 'لا توجد فواتير مرفوعة بعد'}</div>
     ${!done? `<div class="row" style="margin-top:10px;">
       <button class="secondary" onclick="saveWorkshopReport('${t.id}')">حفظ البيانات</button>
-      <button onclick="finishRepair('${t.id}')">إنهاء الإصلاح وطلب إعادة المعدة</button>
-    </div>` : (t.status==='ready_return' ? '<div class="muted" style="margin-top:8px;">بانتظار موافقة الإدارة على إعادة المعدة للمشروع</div>' : '<div class="muted" style="margin-top:8px;">تم إغلاق الملف وإعادة المعدة</div>')}
+      ${t.status==='in_workshop' ? `<button onclick="finishRepair('${t.id}')">إنهاء الإصلاح وطلب إعادة المعدة</button>` : ''}
+    </div>` : (t.status==='ready_return' ? '<div class="muted" style="margin-top:8px;">بانتظار موافقة الإدارة على إعادة المعدة للمشروع</div>' : '<div class="muted" style="margin-top:8px;">🔒 تم اعتماد هذا التقرير نهائياً وإغلاقه — لا يمكن التعديل إلا من الإدارة</div>')}
   </div>`;
 }
 function initWorkshopCardRows(t){
@@ -1385,6 +1408,7 @@ window.logout = logout;
 window.openEquipmentDetail = openEquipmentDetail;
 window.openTransferDetail = openTransferDetail;
 window.decideTransfer = decideTransfer;
+window.unlockReport = unlockReport;
 window.saveWorkshopReport = saveWorkshopReport;
 window.finishRepair = finishRepair;
 window.printModal = printModal;
