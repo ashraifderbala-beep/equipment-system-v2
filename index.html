@@ -238,9 +238,98 @@ async function ensureSeed(){
 function subscribeRealtime(){
   sb.channel('eq-changes')
     .on('postgres_changes', {event:'*', schema:'public', table:'equipment'}, async ()=>{ await fetchAll(); render(); })
-    .on('postgres_changes', {event:'*', schema:'public', table:'transfers'}, async ()=>{ await fetchAll(); render(); })
+    .on('postgres_changes', {event:'*', schema:'public', table:'transfers'}, async ()=>{
+      const oldMap = transfersMap;
+      await fetchAll();
+      detectTransferNotifications(oldMap, transfersMap);
+      render();
+    })
     .on('postgres_changes', {event:'*', schema:'public', table:'projects'}, async ()=>{ await fetchAll(); render(); })
     .subscribe();
+}
+
+// ---------- NOTIFICATIONS ----------
+let notifications = [];
+function isMe(locationName){ return currentUser && currentUser.name === locationName; }
+function addNotification(text, tab){
+  notifications.unshift({id: Date.now()+'_'+Math.random(), text, tab, at:new Date().toISOString(), seen:false});
+  notifications = notifications.slice(0,50);
+  renderNotifBell();
+  playNotifSound();
+  if(document.hidden) showBrowserNotification(text);
+}
+function detectTransferNotifications(oldMap, newMap){
+  if(!currentUser) return;
+  Object.values(newMap).forEach(t=>{
+    const old = oldMap[t.id];
+    if(!old){
+      if(t.status==='pending' && currentUser.role==='admin'){
+        addNotification(`📥 طلب نقل جديد: ${t.equipmentName} (${t.fromLocation} ← ${t.toLocation})`, 'approvals');
+      }
+      return;
+    }
+    if(old.status===t.status) return;
+    if((t.status==='approved' || t.status==='in_workshop') && isMe(t.toLocation)){
+      addNotification(`✅ تمت الموافقة على استلام معدة: ${t.equipmentName}`, 'transfers');
+    }
+    if(t.status==='rejected' && isMe(t.fromLocation)){
+      addNotification(`❌ تم رفض طلب نقل: ${t.equipmentName}`, 'transfers');
+    }
+    if(t.status==='ready_return' && currentUser.role==='admin'){
+      addNotification(`🔧 طلب إعادة معدة من الورشة بانتظار الموافقة: ${t.equipmentName}`, 'approvals');
+    }
+    if(t.status==='completed' && isMe(t.fromLocation)){
+      addNotification(`🔄 عادت معدتك من الورشة: ${t.equipmentName}`, 'transfers');
+    }
+  });
+}
+function playNotifSound(){
+  try{
+    const ctx = new (window.AudioContext||window.webkitAudioContext)();
+    const o = ctx.createOscillator(); const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value = 880; g.gain.value = 0.08;
+    o.start(); setTimeout(()=>{ o.stop(); ctx.close(); }, 150);
+  }catch(e){}
+}
+function showBrowserNotification(text){
+  try{
+    if(window.Notification && Notification.permission==='granted'){
+      new Notification('نظام متابعة ونقل المعدات', {body:text, icon:'🚜'});
+    }
+  }catch(e){}
+}
+function requestNotifPermission(){
+  if(!window.Notification){ alert('متصفحك لا يدعم تنبيهات النظام'); return; }
+  Notification.requestPermission().then(p=>{
+    if(p==='granted') alert('تم تفعيل تنبيهات المتصفح بنجاح ✅');
+    render();
+  });
+}
+function renderNotifBell(){
+  const bell = document.getElementById('notifBellCount');
+  if(!bell) return;
+  const unread = notifications.filter(n=>!n.seen).length;
+  bell.style.display = unread? '' : 'none';
+  bell.textContent = unread>9 ? '9+' : unread;
+}
+function openNotifModal(){
+  notifications.forEach(n=>n.seen=true);
+  renderNotifBell();
+  const modal = document.createElement('div'); modal.className='modal-bg';
+  const permBtn = (window.Notification && Notification.permission!=='granted') ? `<button class="small secondary noprint" onclick="requestNotifPermission()">🔔 تفعيل تنبيهات المتصفح</button>` : '';
+  modal.innerHTML = `<div class="modal"><button class="closebtn" onclick="this.closest('.modal-bg').remove()">✕</button>
+    <h2>الإشعارات</h2>
+    ${permBtn}
+    <div style="margin-top:10px;">
+    ${notifications.length? notifications.map(n=>`
+      <div class="tl-item" style="cursor:pointer;" onclick="setTab('${n.tab}');this.closest('.modal-bg').remove();">
+        <div>${esc(n.text)}</div>
+        <div class="muted">${fmtDateTime(n.at)}</div>
+      </div>`).join('') : '<div class="empty">لا توجد إشعارات بعد</div>'}
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
 }
 async function uploadFile(file, prefix){
   const path = prefix + '/' + Date.now() + '_' + file.name.replace(/[^A-Za-z0-9_.-]/g,'_');
@@ -352,7 +441,13 @@ function render(){
   app.innerHTML = `
     <div class="top">
       <div class="brand"><span class="logo">🚜</span><div><h1 style="font-size:19px;">نظام متابعة ونقل المعدات</h1><div class="muted">إدارة نقل وتتبع معدات المشاريع والورش</div></div></div>
-      <div class="userchip">👤 ${esc(currentUser.name)} <button class="small secondary" onclick="logout()">خروج</button></div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="secondary noprint" style="position:relative;" onclick="openNotifModal()">
+          🔔
+          <span id="notifBellCount" style="display:none;position:absolute;top:-6px;left:-6px;background:var(--danger);color:#fff;border-radius:10px;font-size:11px;padding:1px 5px;line-height:1.4;">0</span>
+        </button>
+        <div class="userchip">👤 ${esc(currentUser.name)} <button class="small secondary" onclick="logout()">خروج</button></div>
+      </div>
     </div>
     <nav>${tabs.map(([k,l])=>`<button class="${currentTab===k?'active':''}" onclick="setTab('${k}')">${l}</button>`).join('')}</nav>
     <div id="body">${body}</div>
@@ -1286,6 +1381,7 @@ async function deleteProject(name){
 
 // ---------- HANDLERS ----------
 function attachHandlers(){
+  renderNotifBell();
   if(currentTab==='reports'){ setTimeout(initReportCharts, 0); } else { destroyCharts(); }
   document.querySelectorAll('[id^="laborRows_"]').forEach(el=>{
     const id = el.id.replace('laborRows_','');
@@ -1409,6 +1505,8 @@ window.openEquipmentDetail = openEquipmentDetail;
 window.openTransferDetail = openTransferDetail;
 window.decideTransfer = decideTransfer;
 window.unlockReport = unlockReport;
+window.openNotifModal = openNotifModal;
+window.requestNotifPermission = requestNotifPermission;
 window.saveWorkshopReport = saveWorkshopReport;
 window.finishRepair = finishRepair;
 window.printModal = printModal;
