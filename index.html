@@ -260,20 +260,22 @@ function isEmailConfigured(){
   return window.emailjs && !EMAILJS_SERVICE_ID.startsWith('YOUR_') && !EMAILJS_TEMPLATE_ID.startsWith('YOUR_') && !EMAILJS_PUBLIC_KEY.startsWith('YOUR_');
 }
 function sendAdminEmail(subject, message){
-  // هذه الدالة "أفضل مجهود" فقط: أي فشل فيها لا يوقف أو يعطّل أي عملية أخرى في النظام
-  if(!isEmailConfigured()) return;
-  (ADMIN_NOTIFY_EMAILS||[]).forEach(email=>{
-    if(!email || !email.trim()) return;
-   try{
-        emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, {
-            to_email: email.trim(),
-            subject: subject,
-            message: message,
-            name: "إدارة المعدات",
-            email: "system@equipment.local"
-        }).catch(err=>console.warn('تعذر إرسال إيميل التنبيه إلى', email, err));
-    }catch(err){ console.warn('emailjs send error', err); }
-  });
+    if(!isEmailConfigured()) return;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    (ADMIN_NOTIFY_EMAILS||[]).forEach(email=>{
+        const clean = (email||'').trim();
+        if(!clean || !emailRegex.test(clean)) return;
+        if(clean.endsWith('@example.com')) return;
+        try{
+            emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, {
+                to_email: clean,
+                subject: subject,
+                message: message,
+                name: "إدارة المعدات",
+                email: "system@equipment.local"
+            }).catch(err=>console.warn('تعذر إرسال إيميل التنبيه إلى', clean, err));
+        }catch(err){ console.warn('emailjs send error', err); }
+    });
 }
 
 // ---------- NOTIFICATIONS ----------
