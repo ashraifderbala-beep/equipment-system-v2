@@ -114,10 +114,10 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 const ADMIN_EMAIL = 'admin@equipment-system.local'; // أنشئ هذا المستخدم من Supabase Authentication
 
 // إعدادات إشعارات البريد الإلكتروني (EmailJS) - عدّلها ببياناتك من emailjs.com
-const EMAILJS_PUBLIC_KEY = 'hz365H8KjhaUSCuX7';
-const EMAILJS_SERVICE_ID = 'service_4nicw1x';
-const EMAILJS_TEMPLATE_ID = 'template_62vbi5d';
-const ADMIN_NOTIFY_EMAILS = ['ashraif8@gmail.com'];
+const EMAILJS_PUBLIC_KEY = 'YOUR_EMAILJS_PUBLIC_KEY';
+const EMAILJS_SERVICE_ID = 'YOUR_EMAILJS_SERVICE_ID';
+const EMAILJS_TEMPLATE_ID = 'YOUR_EMAILJS_TEMPLATE_ID';
+const ADMIN_NOTIFY_EMAILS = ['admin1@example.com', 'admin2@example.com']; // ضع هنا كل إيميلات الإدارة المطلوب تنبيهها
 try{ if(window.emailjs && !EMAILJS_PUBLIC_KEY.startsWith('YOUR_')) emailjs.init(EMAILJS_PUBLIC_KEY); }catch(e){ console.warn('emailjs init failed', e); }
 // ======================================================
 
@@ -260,22 +260,26 @@ function isEmailConfigured(){
   return window.emailjs && !EMAILJS_SERVICE_ID.startsWith('YOUR_') && !EMAILJS_TEMPLATE_ID.startsWith('YOUR_') && !EMAILJS_PUBLIC_KEY.startsWith('YOUR_');
 }
 function sendAdminEmail(subject, message){
-    if(!isEmailConfigured()) return;
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    (ADMIN_NOTIFY_EMAILS||[]).forEach(email=>{
-        const clean = (email||'').trim();
-        if(!clean || !emailRegex.test(clean)) return;
-        if(clean.endsWith('@example.com')) return;
-        try{
-            emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, {
-                to_email: clean,
-                subject: subject,
-                message: message,
-                name: "إدارة المعدات",
-                email: "system@equipment.local"
-            }).catch(err=>console.warn('تعذر إرسال إيميل التنبيه إلى', clean, err));
-        }catch(err){ console.warn('emailjs send error', err); }
-    });
+  // هذه الدالة "أفضل مجهود" فقط: أي فشل فيها لا يوقف أو يعطّل أي عملية أخرى في النظام
+  if(!isEmailConfigured()) return;
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  (ADMIN_NOTIFY_EMAILS||[]).forEach(email=>{
+    const clean = (email||'').trim();
+    if(!clean || !emailRegex.test(clean)) return;          // تجاهل أي عنوان غير صالح الشكل
+    if(clean.endsWith('.local') || clean.endsWith('@example.com')) return; // تجاهل أي عنوان وهمي بنطاق غير حقيقي
+    try{
+      // ملاحظة مهمة: لا نرسل أي حقل "email" وهمي بنطاق .local، لأنه يُستخدم غالباً
+      // كعنوان "Reply-To" داخل قالب EmailJS، ونطاق .local غير موجود فعلياً على الإنترنت،
+      // فيرفضه خادم البريد ويُعيد رسالة فشل تسليم (Bounce) لنفس حساب المرسل.
+      // بترك الحقل بدون قيمة، يستخدم EmailJS تلقائياً بريد الحساب الحقيقي المتصل بالخدمة.
+      emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, {
+        to_email: clean,
+        subject: subject,
+        message: message,
+        name: 'نظام متابعة ونقل المعدات'
+      }).catch(err=>console.warn('تعذر إرسال إيميل التنبيه إلى', clean, err));
+    }catch(err){ console.warn('emailjs send error', err); }
+  });
 }
 
 // ---------- NOTIFICATIONS ----------
