@@ -264,9 +264,14 @@ function sendAdminEmail(subject, message){
   if(!isEmailConfigured()) return;
   (ADMIN_NOTIFY_EMAILS||[]).forEach(email=>{
     if(!email || !email.trim()) return;
-    try{
-      emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, {to_email: email.trim(), subject, message})
-        .catch(err=>console.warn('تعذر إرسال إيميل التنبيه إلى', email, err));
+   try{
+        emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, {
+            to_email: email.trim(),
+            subject: subject,
+            message: message,
+            name: "إدارة المعدات",
+            email: "system@equipment.local"
+        }).catch(err=>console.warn('تعذر إرسال إيميل التنبيه إلى', email, err));
     }catch(err){ console.warn('emailjs send error', err); }
   });
 }
