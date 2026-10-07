@@ -41,6 +41,7 @@ button.small{padding:5px 10px;font-size:12.5px;border-radius:6px;}
 button:disabled{opacity:.5;cursor:not-allowed;}
 input,select,textarea{font-family:var(--font);background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:14px;width:100%;}
 textarea{min-height:70px;resize:vertical;}
+input[type="date"]{direction:ltr;text-align:right;}
 label{display:block;font-size:13px;color:var(--text-dim);margin:10px 0 4px;font-weight:600;}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:var(--shadow);}
 .row{display:flex;gap:10px;flex-wrap:wrap;}
@@ -109,15 +110,15 @@ const EQUIPMENT_SEED = [{"code": "1/2/001", "name": "كمبروسور هواء",
 
 // ============ إعدادات الاتصال بـ Supabase ============
 // عدّل هذين السطرين ببيانات مشروعك في Supabase (Project Settings > API)
-const SUPABASE_URL = 'https://eiaupsizfxtbksctdbyo.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVpYXVwc2l6Znh0YmtzY3RkYnlvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk1OTk2MjQsImV4cCI6MjEwNTE3NTYyNH0.q9UjIxCQmhqEPoX6oT7CWuI1za6lQvB-skoD7uM0rBs';
+const SUPABASE_URL = 'https://YOUR-PROJECT-ID.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
 const ADMIN_EMAIL = 'admin@equipment-system.local'; // أنشئ هذا المستخدم من Supabase Authentication
 
 // إعدادات إشعارات البريد الإلكتروني (EmailJS) - عدّلها ببياناتك من emailjs.com
-const EMAILJS_PUBLIC_KEY = 'hz365H8KjhaUSCuX7';
-const EMAILJS_SERVICE_ID = 'service_4nicw1x';
-const EMAILJS_TEMPLATE_ID = 'template_62vbi5d';
-const ADMIN_NOTIFY_EMAILS = ['ashraif8@gmail.com'];
+const EMAILJS_PUBLIC_KEY = 'YOUR_EMAILJS_PUBLIC_KEY';
+const EMAILJS_SERVICE_ID = 'YOUR_EMAILJS_SERVICE_ID';
+const EMAILJS_TEMPLATE_ID = 'YOUR_EMAILJS_TEMPLATE_ID';
+const ADMIN_NOTIFY_EMAILS = ['admin1@example.com', 'admin2@example.com']; // ضع هنا كل إيميلات الإدارة المطلوب تنبيهها
 try{ if(window.emailjs && !EMAILJS_PUBLIC_KEY.startsWith('YOUR_')) emailjs.init(EMAILJS_PUBLIC_KEY); }catch(e){ console.warn('emailjs init failed', e); }
 // ======================================================
 
