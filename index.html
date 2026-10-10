@@ -139,6 +139,7 @@ function locType(name){
   }
   return 'project';
 }
+function isExternalRepair(t){ return t.transferType==='repair' && t.toLocationType!=='workshop_capital' && t.toLocationType!=='workshop_suez'; }
 function locLabel(t){
   return {project:'مشروع', workshop_capital:'ورشة العاصمة الإدارية', workshop_suez:'ورشة السويس', workshop_external:'ورشة خارجية'}[t] || t;
 }
@@ -324,7 +325,7 @@ function detectTransferNotifications(oldMap, newMap){
       return;
     }
     if(old.status===t.status) return;
-    if(t.status==='in_workshop' && t.toLocationType==='workshop_external' && isMe(t.fromLocation)){
+    if(t.status==='in_workshop' && isExternalRepair(t) && isMe(t.fromLocation)){
       addNotification(`✅ تمت الموافقة على إرسال المعدة للورشة الخارجية: ${t.equipmentName}. بعد عودتها سجّل الفواتير من تبويب إصلاحات الورش الخارجية`, 'external');
     }
     if((t.status==='approved' || t.status==='in_workshop') && isMe(t.toLocation)){
@@ -847,7 +848,7 @@ function renderWorkshopTab(workshopName){
   return list.map(t=>renderWorkshopCard(t)).join('');
 }
 function renderExternalRepairs(){
-  const list = transferList().filter(t=>t.transferType==='repair' && t.toLocationType==='workshop_external' && ['in_workshop','ready_return','completed'].includes(t.status) && (currentUser.role==='admin' || t.fromLocation===currentUser.name));
+  const list = transferList().filter(t=>isExternalRepair(t) && ['in_workshop','ready_return','completed'].includes(t.status) && (currentUser.role==='admin' || t.fromLocation===currentUser.name));
   if(!list.length) return '<div class="card empty">لا توجد معدات معتمدة حالياً في ورش خارجية</div>';
   return list.map(t=>renderWorkshopCard(t)).join('');
 }
@@ -935,7 +936,7 @@ function renderWorkshopCard(t){
   const done = isWorkshopEditLocked(t);
   const state = ensureWorkState(t);
   const {laborTotal, partsTotal, grand} = calcTotals(state);
-  const external = t.toLocationType==='workshop_external';
+  const external = isExternalRepair(t);
   return `<div class="card">
     <div class="top" style="margin-bottom:6px;">
       <div><b>${esc(t.equipmentName)}</b> <span class="muted">(${esc(t.equipmentCode)})</span></div>
@@ -1011,7 +1012,7 @@ async function finishRepair(id){
   if(savedOk===false) return;
   if(!confirm('سيتم إرسال طلب إعادة المعدة للإدارة للموافقة. متابعة؟')) return;
   const t = transfersMap[id];
-  const isExt = t.toLocationType==='workshop_external';
+  const isExt = isExternalRepair(t);
   if(isExt && (!t.entryDate || !t.exitDate || !t.workDone)){
     alert('لإتمام الاستلام يجب كتابة تاريخ دخول وخروج المعدة من الورشة الخارجية، وما تم إصلاحه، ثم الضغط على "حفظ البيانات" أولاً.');
     return;
@@ -1043,7 +1044,7 @@ function renderReports(){
   }
   const capitalDur = avgDuration(completedRepairs.filter(t=>t.toLocationType==='workshop_capital'));
   const suezDur = avgDuration(completedRepairs.filter(t=>t.toLocationType==='workshop_suez'));
-  const extDur = avgDuration(completedRepairs.filter(t=>t.toLocationType==='workshop_external'));
+  const extDur = avgDuration(completedRepairs.filter(t=>isExternalRepair(t)));
   const currentlyInWorkshop = eq.filter(e=>e.locationType && e.locationType.startsWith('workshop'));
   const byProjectCount = {};
   eq.forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
@@ -1530,6 +1531,7 @@ async function submitNewTransfer(){
   const type = document.getElementById('ntType').value;
   const destSel = document.getElementById('ntDest');
   let dest = destSel ? destSel.value : '';
+  const wasExternal = (dest==='__external__');
   const maintDate = getDate('ntMaintDate');
   if(maintDate===null){ alert('تاريخ آخر صيانة غير صحيح. اكتبه بالشكل: يوم/شهر/سنة مثال 25/09/2026'); return; }
   const meter = document.getElementById('ntMeter').value.trim();
@@ -1552,7 +1554,7 @@ async function submitNewTransfer(){
     if(!parts){ alert('في حالة النقل الدائم يجب ذكر قطع الغيار والفلاتر المرسلة مع المعدة'); return; }
   }
   const eq = equipmentMap[eqCode];
-  const destType = type==='repair' ? locType(dest) : 'project';
+  const destType = type==='repair' ? (wasExternal ? 'workshop_external' : locType(dest)) : 'project';
 
   const payload = {
     equipment_code: eq.code, equipment_name: eq.name,
