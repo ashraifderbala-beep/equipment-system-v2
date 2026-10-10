@@ -41,7 +41,7 @@ button.small{padding:5px 10px;font-size:12.5px;border-radius:6px;}
 button:disabled{opacity:.5;cursor:not-allowed;}
 input,select,textarea{font-family:var(--font);background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:14px;width:100%;}
 textarea{min-height:70px;resize:vertical;}
-input[type="date"]{direction:ltr;text-align:right;}
+.dateinp{direction:ltr;text-align:center;letter-spacing:1px;}
 label{display:block;font-size:13px;color:var(--text-dim);margin:10px 0 4px;font-weight:600;}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:var(--shadow);}
 .row{display:flex;gap:10px;flex-wrap:wrap;}
@@ -163,6 +163,26 @@ function statusBadgeClass(s){
   return 'b-pending';
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ---------- حقول التاريخ (يوم/شهر/سنة) ----------
+function isoToDMY(iso){ const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(iso||''); return m ? m[3]+'/'+m[2]+'/'+m[1] : (iso||''); }
+function dmyToISO(s){
+  s=(s||'').trim(); if(!s) return '';
+  const m=/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s); if(!m) return null;
+  const d=+m[1], mo=+m[2], y=+m[3]; const dt=new Date(y,mo-1,d);
+  if(dt.getFullYear()!==y || dt.getMonth()!==mo-1 || dt.getDate()!==d) return null;
+  return y+'-'+String(mo).padStart(2,'0')+'-'+String(d).padStart(2,'0');
+}
+function dateField(id, iso, disabled){
+  return `<input type="text" class="dateinp" id="${id}" inputmode="numeric" maxlength="10" autocomplete="off" placeholder="يوم/شهر/سنة  مثال: 25/09/2026" value="${esc(isoToDMY(iso))}" ${disabled?'disabled':''}>`;
+}
+function getDate(id){ const el=document.getElementById(id); return el ? dmyToISO(el.value) : ''; }
+document.addEventListener('input', function(e){
+  const el=e.target; if(!el.classList || !el.classList.contains('dateinp')) return;
+  let d=el.value.replace(/[٠-٩]/g,c=>String(c.charCodeAt(0)-1632)).replace(/[۰-۹]/g,c=>String(c.charCodeAt(0)-1776)).replace(/[^0-9]/g,'').slice(0,8);
+  let out=d.slice(0,2); if(d.length>2) out+='/'+d.slice(2,4); if(d.length>4) out+='/'+d.slice(4,8);
+  el.value=out;
+});
 
 let currentUser = JSON.parse(localStorage.getItem('eq_user')||'null');
 let equipmentMap = {};
@@ -304,6 +324,9 @@ function detectTransferNotifications(oldMap, newMap){
       return;
     }
     if(old.status===t.status) return;
+    if(t.status==='in_workshop' && t.toLocationType==='workshop_external' && isMe(t.fromLocation)){
+      addNotification(`✅ تمت الموافقة على إرسال المعدة للورشة الخارجية: ${t.equipmentName}. بعد عودتها سجّل الفواتير من تبويب إصلاحات الورش الخارجية`, 'external');
+    }
     if((t.status==='approved' || t.status==='in_workshop') && isMe(t.toLocation)){
       addNotification(`✅ تمت الموافقة على استلام معدة: ${t.equipmentName}`, 'transfers');
     }
@@ -456,6 +479,7 @@ function render(){
   tabs.push(['transfers', role==='admin' ? 'كل طلبات النقل' : 'طلباتي']);
   if(role==='admin') tabs.push(['approvals','الموافقات']);
   if(role==='workshop') tabs.push(['workshop', 'ورشتي: '+currentUser.name]);
+  if(role==='project') tabs.push(['external','إصلاحات الورش الخارجية']);
   if(role==='admin') tabs.push(['workshops','متابعة الورش']);
   if(role==='admin') tabs.push(['reports','تقارير الإدارة']);
   if(role==='admin') tabs.push(['manage','إدارة المعدات والمشاريع']);
@@ -469,6 +493,7 @@ function render(){
     else if(currentTab==='approvals') body = renderApprovals();
     else if(currentTab==='workshop') body = renderWorkshopTab(currentUser.name);
     else if(currentTab==='workshops') body = renderWorkshopsOverview();
+    else if(currentTab==='external') body = renderExternalRepairs();
     else if(currentTab==='reports') body = renderReports();
     else if(currentTab==='manage') body = renderManage();
   }catch(e){ console.error(e); body = '<div class="card">حدث خطأ في عرض هذه الصفحة.</div>'; }
@@ -650,7 +675,7 @@ function renderNewTransfer(){
 
     <div class="section-title">بيانات إلزامية قبل النقل</div>
     <div class="two-col">
-      <div><label>تاريخ آخر صيانة <span class="req">*</span></label><input type="date" id="ntMaintDate"></div>
+      <div><label>تاريخ آخر صيانة <span class="req">*</span></label>${dateField('ntMaintDate','')}</div>
       <div><label>عداد الصيانة (ساعات/كم) <span class="req">*</span></label><input id="ntMeter" placeholder="مثال: 1250 ساعة"></div>
     </div>
     <label>آخر فلتر تم تغييره <span class="req">*</span></label>
@@ -687,7 +712,7 @@ function renderDestOptions(type){
     <div id="ntExternalWrap" style="display:none;"><label>اسم الورشة الخارجية</label><input id="ntExternalName" placeholder="اسم الورشة"></div>`;
   }
   let opts = `<option value="">-- اختر المشروع --</option>` + allProjectLocations().map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('');
-  let extra = type==='mission' ? `<label>تاريخ العودة المتوقع</label><input type="date" id="ntMissionEnd">` : '';
+  let extra = type==='mission' ? `<label>تاريخ العودة المتوقع</label>${dateField('ntMissionEnd','')}` : '';
   return `<label>المشروع المستقبل <span class="req">*</span></label><select id="ntDest">${opts}</select>${extra}`;
 }
 
@@ -724,7 +749,7 @@ function openTransferDetail(id){
    <div class="row"><div><b>من:</b> ${esc(t.fromLocation)}</div><div><b>إلى:</b> ${esc(t.toLocation)}</div></div>
    <div class="row"><div><b>بواسطة:</b> ${esc(t.requestedBy)}</div><div><b>بتاريخ:</b> ${fmtDateTime(t.requestedAt)}</div></div>
    <div class="section-title">بيانات فنية عند النقل</div>
-   <div class="row"><div><b>آخر صيانة:</b> ${esc(t.lastMaintenanceDate)||'—'}</div><div><b>عداد الصيانة:</b> ${esc(t.lastMaintenanceMeter)||'—'}</div></div>
+   <div class="row"><div><b>آخر صيانة:</b> ${esc(isoToDMY(t.lastMaintenanceDate))||'—'}</div><div><b>عداد الصيانة:</b> ${esc(t.lastMaintenanceMeter)||'—'}</div></div>
    <div><b>آخر فلتر تم تغييره:</b> ${esc(t.lastFilterChanged)||'—'}</div>
    <div><b>مشتملات المعدة:</b> ${esc(t.accessories)||'—'}</div>
    ${t.photoAssetUrl? `<img class="imgprev" src="${t.photoAssetUrl}">`:''}
@@ -734,10 +759,11 @@ function openTransferDetail(id){
    ${(t.transferType==='repair' && (t.entryDate||t.exitDate||t.workDone)) ? `
    <div class="section-title">تقرير الورشة</div>
    <div class="row"><div><b>تاريخ الدخول:</b> ${fmtDate(t.entryDate)}</div><div><b>تاريخ الخروج:</b> ${fmtDate(t.exitDate)||'—'}</div></div>
+   ${(t.entryDate&&t.exitDate)? `<div><b>مدة الإصلاح:</b> ${daysBetween(t.entryDate,t.exitDate)} يوم</div>` : ''}
    ${t.workDone?`<div><b>ما تم إنجازه:</b> ${esc(t.workDone)}</div>`:''}
    ${t.workShouldBeDone?`<div><b>ما كان يجب إنجازه:</b> ${esc(t.workShouldBeDone)}</div>`:''}
    ${t.technicalNotes?`<div><b>ملاحظات فنية:</b> ${esc(t.technicalNotes)}</div>`:''}
-   ${(t.invoices&&t.invoices.length)? `<div><b>الفواتير:</b> ${t.invoices.map((iv,i)=>`<a href="${iv.url}" target="_blank">فاتورة ${i+1}</a>`).join(' | ')}</div>`:''}
+   ${(t.invoices&&t.invoices.length)? `<div><b>الفواتير:</b> ${invLinks(t)}</div>`:''}
    ${(t.labor&&t.labor.length)? `<div style="margin-top:8px;"><b>العمالة:</b>${t.labor.map(x=>`<div class="muted">${esc(x.name)} — ${esc(x.role)||'—'} — ${x.hours||0} ساعة × ${x.rate||0} = ${costLine(x.hours,x.rate).toLocaleString()}</div>`).join('')}</div>`:''}
    ${(t.parts&&t.parts.length)? `<div style="margin-top:8px;"><b>قطع الغيار:</b>${t.parts.map(x=>`<div class="muted">${esc(x.name)} — الكمية ${x.qty||0} × ${x.price||0} = ${costLine2(x.qty,x.price).toLocaleString()}</div>`).join('')}</div>`:''}
    ${((t.labor&&t.labor.length)||(t.parts&&t.parts.length))? `<div style="margin-top:6px;"><b>إجمالي تكلفة الإصلاح: ${((t.labor||[]).reduce((s,x)=>s+costLine(x.hours,x.rate),0)+(t.parts||[]).reduce((s,x)=>s+costLine2(x.qty,x.price),0)).toLocaleString()}</b></div>`:''}
@@ -820,9 +846,18 @@ function renderWorkshopTab(workshopName){
   if(!list.length) return '<div class="card empty">لا توجد معدات في هذه الورشة حالياً</div>';
   return list.map(t=>renderWorkshopCard(t)).join('');
 }
+function renderExternalRepairs(){
+  const list = transferList().filter(t=>t.transferType==='repair' && t.toLocationType==='workshop_external' && ['in_workshop','ready_return','completed'].includes(t.status) && (currentUser.role==='admin' || t.fromLocation===currentUser.name));
+  if(!list.length) return '<div class="card empty">لا توجد معدات معتمدة حالياً في ورش خارجية</div>';
+  return list.map(t=>renderWorkshopCard(t)).join('');
+}
 function renderWorkshopsOverview(){
   return `<div class="section-title">${WORKSHOP_CAPITAL}</div>${renderWorkshopTab(WORKSHOP_CAPITAL)}
-  <div class="section-title">${WORKSHOP_SUEZ}</div>${renderWorkshopTab(WORKSHOP_SUEZ)}`;
+  <div class="section-title">${WORKSHOP_SUEZ}</div>${renderWorkshopTab(WORKSHOP_SUEZ)}
+  <div class="section-title">الورش الخارجية</div>${renderExternalRepairs()}`;
+}
+function invLinks(t){
+  return (t.invoices||[]).map((iv,i)=>`<a href="${iv.url}" target="_blank">فاتورة ${i+1}${iv.amount?' ('+Number(iv.amount).toLocaleString()+')':''}</a>`).join(' | ');
 }
 let workEditState = {}; // {transferId: {labor:[{name,role,hours,rate}], parts:[{name,qty,price}]}}
 function ensureWorkState(t){
@@ -900,21 +935,24 @@ function renderWorkshopCard(t){
   const done = isWorkshopEditLocked(t);
   const state = ensureWorkState(t);
   const {laborTotal, partsTotal, grand} = calcTotals(state);
+  const external = t.toLocationType==='workshop_external';
   return `<div class="card">
     <div class="top" style="margin-bottom:6px;">
       <div><b>${esc(t.equipmentName)}</b> <span class="muted">(${esc(t.equipmentCode)})</span></div>
       ${transferStatusBadge(t)}
     </div>
-    <div class="muted">وارد من: ${esc(t.fromLocation)} | دخلت الورشة بموجب اعتماد بتاريخ ${fmtDate(t.approvedAt)}</div>
+    ${external ? `<div class="muted">ورشة خارجية: <b>${esc(t.toLocation)}</b> | أُرسلت من: ${esc(t.fromLocation)} | اعتماد النقل بتاريخ ${fmtDate(t.approvedAt)}</div>
+    ${!done ? '<div class="card" style="background:var(--surface-2);margin:8px 0;">بعد عودة المعدة من الورشة الخارجية: اكتب تاريخ دخولها وخروجها، وما تم إصلاحه، وارفع الفواتير، ثم اضغط "تم الإصلاح واستلام المعدة".</div>' : ''}` : `<div class="muted">وارد من: ${esc(t.fromLocation)} | دخلت الورشة بموجب اعتماد بتاريخ ${fmtDate(t.approvedAt)}</div>`}
     ${t.inspectionFormUrl? `<a href="${t.inspectionFormUrl}" target="_blank">نموذج الفحص الفني</a>` : '<span class="muted">لا يوجد نموذج فحص فني</span>'}
     <div class="two-col" style="margin-top:8px;">
-      <div><label>تاريخ الدخول</label><input type="date" id="wentry_${t.id}" value="${t.entryDate||''}" ${done?'disabled':''}></div>
-      <div><label>تاريخ الخروج</label><input type="date" id="wexit_${t.id}" value="${t.exitDate||''}" ${done?'disabled':''}></div>
+      <div><label>تاريخ الدخول</label>${dateField('wentry_'+t.id, t.entryDate, done)}</div>
+      <div><label>تاريخ الخروج</label>${dateField('wexit_'+t.id, t.exitDate, done)}</div>
     </div>
     <label>ما تم إنجازه</label><textarea id="wdone_${t.id}" ${done?'disabled':''}>${esc(t.workDone||'')}</textarea>
     <label>ما كان يجب أن يتم</label><textarea id="wshould_${t.id}" ${done?'disabled':''}>${esc(t.workShouldBeDone||'')}</textarea>
     <label>ملاحظات فنية</label><textarea id="wnotes_${t.id}" ${done?'disabled':''}>${esc(t.technicalNotes||'')}</textarea>
 
+    ${external ? '' : `
     <div class="section-title">👷 العمالة المشاركة في الإصلاح (للحوافز)</div>
     <div id="laborRows_${t.id}"></div>
     ${!done? `<button class="small secondary" style="margin-top:6px;" onclick="addLaborRow('${t.id}')">+ إضافة فني</button>` : ''}
@@ -926,13 +964,15 @@ function renderWorkshopCard(t){
     <div class="card" style="background:var(--surface-2);margin-top:12px;margin-bottom:0;">
       <div id="costSummary_${t.id}" style="font-size:14px;"></div>
     </div>
+    `}
 
-    <label style="margin-top:14px;">رفع فاتورة إصلاح (اختياري، للمرفقات فقط)</label>
+    <label style="margin-top:14px;">${external ? 'رفع فاتورة الورشة الخارجية' : 'رفع فاتورة إصلاح (اختياري، للمرفقات فقط)'}</label>
     ${!done? `<input type="file" id="winvoice_${t.id}" accept="image/*,application/pdf">` : ''}
-    <div class="muted">${(t.invoices&&t.invoices.length)? t.invoices.map((iv,i)=>`<a href="${iv.url}" target="_blank">فاتورة ${i+1}</a>`).join(' | ') : 'لا توجد فواتير مرفوعة بعد'}</div>
+    ${(!done && external) ? `<input type="number" min="0" step="1" id="winvoiceAmt_${t.id}" placeholder="قيمة الفاتورة (اختياري)" style="margin-top:6px;"><div class="hint">لرفع أكثر من فاتورة: ارفع واحدة واضغط "حفظ البيانات" ثم ارفع التالية.</div>` : ''}
+    <div class="muted">${(t.invoices&&t.invoices.length)? invLinks(t) : 'لا توجد فواتير مرفوعة بعد'}</div>
     ${!done? `<div class="row" style="margin-top:10px;">
       <button class="secondary" onclick="saveWorkshopReport('${t.id}')">حفظ البيانات</button>
-      ${t.status==='in_workshop' ? `<button onclick="finishRepair('${t.id}')">إنهاء الإصلاح وطلب إعادة المعدة</button>` : ''}
+      ${t.status==='in_workshop' ? `<button onclick="finishRepair('${t.id}')">${external ? 'تم الإصلاح واستلام المعدة (إرسال للاعتماد)' : 'إنهاء الإصلاح وطلب إعادة المعدة'}</button>` : ''}
     </div>` : (t.status==='ready_return' ? '<div class="muted" style="margin-top:8px;">بانتظار موافقة الإدارة على إعادة المعدة للمشروع</div>' : '<div class="muted" style="margin-top:8px;">🔒 تم اعتماد هذا التقرير نهائياً وإغلاقه — لا يمكن التعديل إلا من الإدارة</div>')}
   </div>`;
 }
@@ -941,8 +981,9 @@ function initWorkshopCardRows(t){
   renderPartsRows(t.id);
 }
 async function saveWorkshopReport(id){
-  const entryDate = document.getElementById('wentry_'+id).value;
-  const exitDate = document.getElementById('wexit_'+id).value;
+  const entryDate = getDate('wentry_'+id);
+  const exitDate = getDate('wexit_'+id);
+  if(entryDate===null || exitDate===null){ alert('تاريخ الدخول أو الخروج غير صحيح. اكتبه بالشكل: يوم/شهر/سنة مثال 25/09/2026'); return false; }
   const workDone = document.getElementById('wdone_'+id).value.trim();
   const workShouldBeDone = document.getElementById('wshould_'+id).value.trim();
   const technicalNotes = document.getElementById('wnotes_'+id).value.trim();
@@ -955,7 +996,8 @@ async function saveWorkshopReport(id){
     try{
       const url = await uploadFile(fileInput.files[0], 'invoices');
       const t = transfersMap[id];
-      const invoices = (t.invoices||[]).concat([{url, desc:'فاتورة', at:new Date().toISOString()}]);
+      const amtEl = document.getElementById('winvoiceAmt_'+id);
+      const invoices = (t.invoices||[]).concat([{url, desc:'فاتورة', at:new Date().toISOString(), amount: amtEl ? (parseFloat(amtEl.value)||0) : 0}]);
       patch.invoices = invoices;
     }catch(e){ alert('تعذر رفع الملف: '+e.message); }
   }
@@ -965,9 +1007,15 @@ async function saveWorkshopReport(id){
   alert('تم الحفظ');
 }
 async function finishRepair(id){
-  await saveWorkshopReport(id);
+  const savedOk = await saveWorkshopReport(id);
+  if(savedOk===false) return;
   if(!confirm('سيتم إرسال طلب إعادة المعدة للإدارة للموافقة. متابعة؟')) return;
   const t = transfersMap[id];
+  const isExt = t.toLocationType==='workshop_external';
+  if(isExt && (!t.entryDate || !t.exitDate || !t.workDone)){
+    alert('لإتمام الاستلام يجب كتابة تاريخ دخول وخروج المعدة من الورشة الخارجية، وما تم إصلاحه، ثم الضغط على "حفظ البيانات" أولاً.');
+    return;
+  }
   const patch = {status:'ready_return'};
   if(!t.exitDate) patch.exit_date = new Date().toISOString().slice(0,10);
   const {error} = await sb.from('transfers').update(patch).eq('id', id);
@@ -975,7 +1023,7 @@ async function finishRepair(id){
   try{
     sendAdminEmail(
       `طلب إعادة معدة من الورشة: ${t.equipmentName}`,
-      `الورشة "${currentUser.name}" أنهت إصلاح المعدة وتطلب إعادتها للمشروع.\n\nالمعدة: ${t.equipmentName} (${t.equipmentCode})\nستعود إلى: ${t.fromLocation}\n\nيرجى الدخول للنظام لاعتماد إعادة المعدة.`
+      (isExt ? `المشروع "${currentUser.name}" استلم المعدة من الورشة الخارجية "${t.toLocation}" بعد الإصلاح ويطلب اعتماد عودتها.\n\nمدة الإصلاح: ${daysBetween(t.entryDate,t.exitDate)} يوم\nما تم إصلاحه: ${t.workDone}` : `الورشة "${currentUser.name}" أنهت إصلاح المعدة وتطلب إعادتها للمشروع.\n\nالمعدة: ${t.equipmentName} (${t.equipmentCode})\nستعود إلى: ${t.fromLocation}\n\nيرجى الدخول للنظام لاعتماد إعادة المعدة.`)
     );
   }catch(mailErr){ console.warn('email notify failed (ignored)', mailErr); }
   await fetchAll(); render();
@@ -995,6 +1043,7 @@ function renderReports(){
   }
   const capitalDur = avgDuration(completedRepairs.filter(t=>t.toLocationType==='workshop_capital'));
   const suezDur = avgDuration(completedRepairs.filter(t=>t.toLocationType==='workshop_suez'));
+  const extDur = avgDuration(completedRepairs.filter(t=>t.toLocationType==='workshop_external'));
   const currentlyInWorkshop = eq.filter(e=>e.locationType && e.locationType.startsWith('workshop'));
   const byProjectCount = {};
   eq.forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
@@ -1037,7 +1086,7 @@ function renderReports(){
     });
   });
   const workerRows = Object.entries(workerStats).map(([name,s])=>({name, role:s.role, repairs:s.repairs.size, hours:s.hours, cost:s.cost})).sort((a,b)=>b.cost-a.cost);
-  const totalRepairCost = tr.reduce((s,t)=> s + (t.labor||[]).reduce((s2,x)=>s2+costLine(x.hours,x.rate),0) + (t.parts||[]).reduce((s2,x)=>s2+costLine2(x.qty,x.price),0), 0);
+  const totalRepairCost = tr.reduce((s,t)=> s + (t.labor||[]).reduce((s2,x)=>s2+costLine(x.hours,x.rate),0) + (t.parts||[]).reduce((s2,x)=>s2+costLine2(x.qty,x.price),0) + (t.invoices||[]).reduce((s2,x)=>s2+(parseFloat(x.amount)||0),0), 0);
 
   return `
   <div class="row noprint" style="margin-bottom:10px;">
@@ -1050,6 +1099,7 @@ function renderReports(){
     <div class="stat"><b>${byType.repair||0}</b><span>عمليات نقل للإصلاح</span></div>
     <div class="stat"><b>${capitalDur??'—'}</b><span>متوسط أيام الإصلاح - ورشة العاصمة</span></div>
     <div class="stat"><b>${suezDur??'—'}</b><span>متوسط أيام الإصلاح - ورشة السويس</span></div>
+    <div class="stat"><b>${extDur??'—'}</b><span>متوسط أيام الإصلاح - ورش خارجية</span></div>
     <div class="stat"><b>${totalRepairCost.toLocaleString()}</b><span>إجمالي تكلفة الإصلاحات (عمالة + قطع غيار)</span></div>
   </div>
 
@@ -1480,7 +1530,8 @@ async function submitNewTransfer(){
   const type = document.getElementById('ntType').value;
   const destSel = document.getElementById('ntDest');
   let dest = destSel ? destSel.value : '';
-  const maintDate = document.getElementById('ntMaintDate').value;
+  const maintDate = getDate('ntMaintDate');
+  if(maintDate===null){ alert('تاريخ آخر صيانة غير صحيح. اكتبه بالشكل: يوم/شهر/سنة مثال 25/09/2026'); return; }
   const meter = document.getElementById('ntMeter').value.trim();
   const filter = document.getElementById('ntFilter').value.trim();
   const accessories = document.getElementById('ntAccessories').value.trim();
@@ -1512,7 +1563,7 @@ async function submitNewTransfer(){
     parts_and_spares: parts,
     requested_by: currentUser.name, status:'pending'
   };
-  if(type==='mission'){ payload.mission_end_date = document.getElementById('ntMissionEnd')?.value || ''; }
+  if(type==='mission'){ const me = getDate('ntMissionEnd'); if(me===null){ alert('تاريخ العودة المتوقع غير صحيح. اكتبه بالشكل: يوم/شهر/سنة'); return; } payload.mission_end_date = me || ''; }
 
   uploadingFlag = true;
   const btn = document.getElementById('ntSubmit'); btn.disabled = true; btn.textContent = 'جارِ الإرسال...';
