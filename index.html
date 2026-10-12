@@ -552,32 +552,59 @@ function render(){
 function setTab(t){ currentTab=t; render(); window.scrollTo(0,0); }
 
 // ---------- DASHBOARD ----------
-function renderDashboard(){
+function scopedEquipment(){
   const eq = equipList();
+  return currentUser.role==='admin' ? eq : eq.filter(e=>e.project===currentUser.name);
+}
+function scopedTransfers(){
   const tr = transferList();
-  const pending = tr.filter(t=>t.status==='pending').length;
-  const inWorkshop = eq.filter(e=>e.locationType && e.locationType.startsWith('workshop')).length;
-  let scope = eq;
-  if(currentUser.role==='project') scope = eq.filter(e=>e.project===currentUser.name);
-  if(currentUser.role==='workshop') scope = eq.filter(e=>e.project===currentUser.name);
+  return currentUser.role==='admin' ? tr : tr.filter(t=>t.fromLocation===currentUser.name || t.toLocation===currentUser.name);
+}
+function renderDashboard(){
+  const role = currentUser.role, me = currentUser.name;
+  const allEq = equipList();
+  const eq = scopedEquipment();
+  const tr = scopedTransfers();
+  const away = ['in_workshop','ready_return'];
+  let stats;
+  if(role==='admin'){
+    stats = [
+      [allEq.length,'إجمالي المعدات'],
+      [allEq.filter(e=>e.locationType && e.locationType.startsWith('workshop')).length,'معدات داخل الورش حالياً'],
+      [tr.filter(t=>t.status==='pending').length,'طلبات نقل قيد الموافقة'],
+      [tr.length,'إجمالي عمليات النقل المسجلة']
+    ];
+  } else if(role==='workshop'){
+    stats = [
+      [tr.filter(t=>t.toLocation===me && t.status==='in_workshop').length,'معدات داخل الورشة حالياً'],
+      [tr.filter(t=>t.toLocation===me && t.status==='ready_return').length,'بانتظار اعتماد الإدارة للعودة'],
+      [tr.filter(t=>t.toLocation===me && t.status==='completed').length,'إصلاحات مكتملة'],
+      [tr.length,'إجمالي عمليات النقل']
+    ];
+  } else {
+    stats = [
+      [eq.length,'معدات مشروعي'],
+      [tr.filter(t=>t.fromLocation===me && t.transferType==='repair' && away.includes(t.status)).length,'معدات مرسلة للإصلاح حالياً'],
+      [tr.filter(t=>t.fromLocation===me && t.status==='pending').length,'طلبات نقل قيد الموافقة'],
+      [tr.length,'إجمالي عمليات النقل']
+    ];
+  }
   const recentTr = tr.slice(0,6);
   return `
   <div class="grid-stats">
-    <div class="stat"><b>${eq.length}</b><span>إجمالي المعدات</span></div>
-    <div class="stat"><b>${inWorkshop}</b><span>معدات داخل الورش حالياً</span></div>
-    <div class="stat"><b>${pending}</b><span>طلبات نقل قيد الموافقة</span></div>
-    <div class="stat"><b>${tr.length}</b><span>إجمالي عمليات النقل المسجلة</span></div>
+    ${stats.map(([n,label])=>`<div class="stat"><b>${n}</b><span>${label}</span></div>`).join('')}
   </div>
   <div class="card">
-    <h3>${currentUser.role==='admin' ? 'أحدث طلبات النقل' : 'أحدث نشاط يخصّني'}</h3>
+    <h3>${role==='admin' ? 'أحدث طلبات النقل' : 'أحدث نشاط يخصّني'}</h3>
     ${recentTr.length? recentTr.map(t=>transferRowMini(t)).join('') : '<div class="empty">لا توجد طلبات نقل بعد</div>'}
   </div>
-  ${currentUser.role!=='admin' ? `<div class="card"><h3>معداتي الحالية (${scope.length})</h3>
+  ${role==='project' ? `<div class="card"><h3>معداتي الحالية (${eq.length})</h3>
     <div class="tablewrap"><table><thead><tr><th>الكود</th><th>الاسم</th><th>الحالة</th></tr></thead><tbody>
-    ${scope.slice(0,15).map(e=>`<tr><td>${esc(e.code)}</td><td>${esc(e.name)}</td><td><span class="badge ${statusBadgeClass(e.status)}">${esc(e.status)}</span></td></tr>`).join('')||''}
+    ${eq.slice(0,15).map(e=>`<tr><td>${esc(e.code)}</td><td>${esc(e.name)}</td><td><span class="badge ${statusBadgeClass(e.status)}">${esc(e.status)}</span></td></tr>`).join('')||''}
     </tbody></table></div></div>` : ''}
   `;
 }
+
 function transferRowMini(t){
   return `<div style="display:flex;justify-content:space-between;border-bottom:1px solid var(--border);padding:8px 0;flex-wrap:wrap;gap:6px;">
     <div><b>${esc(t.equipmentName)}</b> <span class="muted">(${esc(t.equipmentCode)})</span><br>
@@ -595,12 +622,14 @@ function transferStatusBadge(t){
 
 // ---------- EQUIPMENT LIST ----------
 function renderEquipmentList(){
-  let eq = equipList();
+  let eq = scopedEquipment();
+  const isAdmin = currentUser.role==='admin';
   return `
   <div class="card noprint">
+    ${isAdmin ? '' : `<div class="muted" style="margin-bottom:8px;">معدات ${esc(currentUser.name)} فقط (${eq.length})</div>`}
     <div class="row">
       <input id="eqSearch" placeholder="بحث بالكود أو الاسم...">
-      <select id="eqProjFilter"><option value="">كل المواقع</option>${allLoginLocations().map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('')}</select>
+      ${isAdmin ? `<select id="eqProjFilter"><option value="">كل المواقع</option>${allLoginLocations().map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('')}</select>` : ''}
       <select id="eqStatusFilter"><option value="">كل الحالات</option>${Array.from(new Set(eq.map(e=>e.status))).filter(Boolean).map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select>
     </div>
   </div>
@@ -615,7 +644,7 @@ function fillEquipmentTable(){
   const q = (document.getElementById('eqSearch')?.value||'').trim().toLowerCase();
   const pf = document.getElementById('eqProjFilter')?.value||'';
   const sf = document.getElementById('eqStatusFilter')?.value||'';
-  let eq = equipList();
+  let eq = scopedEquipment();
   if(q) eq = eq.filter(e=>(e.code||'').toLowerCase().includes(q) || (e.name||'').toLowerCase().includes(q));
   if(pf) eq = eq.filter(e=>e.project===pf);
   if(sf) eq = eq.filter(e=>e.status===sf);
@@ -748,7 +777,7 @@ function renderDestOptions(type){
 // ---------- TRANSFERS LIST ----------
 function renderTransfersList(){
   let list = transferList();
-  if(currentUser.role==='project') list = list.filter(t=>t.fromLocation===currentUser.name || t.toLocation===currentUser.name);
+  if(currentUser.role!=='admin') list = list.filter(t=>t.fromLocation===currentUser.name || t.toLocation===currentUser.name);
   return `
   <div class="tabs2 noprint" id="trFilterTabs">
     ${['all','pending','approved','in_workshop','ready_return','rejected','completed'].map(s=>`<button data-f="${s}" class="${s==='all'?'active':''}">${trFilterLabel(s)}</button>`).join('')}
@@ -1512,8 +1541,10 @@ function attachHandlers(){
   if(eqSearch){
     fillEquipmentTable();
     ['eqSearch','eqProjFilter','eqStatusFilter'].forEach(id=>{
-      document.getElementById(id).addEventListener('input', fillEquipmentTable);
-      document.getElementById(id).addEventListener('change', fillEquipmentTable);
+      const el = document.getElementById(id);
+      if(!el) return;
+      el.addEventListener('input', fillEquipmentTable);
+      el.addEventListener('change', fillEquipmentTable);
     });
   }
   const ntType = document.getElementById('ntType');
@@ -1547,7 +1578,7 @@ function attachHandlers(){
         trTabs.querySelectorAll('button').forEach(x=>x.classList.remove('active'));
         b.classList.add('active');
         let list = transferList();
-        if(currentUser.role==='project') list = list.filter(t=>t.fromLocation===currentUser.name || t.toLocation===currentUser.name);
+        if(currentUser.role!=='admin') list = list.filter(t=>t.fromLocation===currentUser.name || t.toLocation===currentUser.name);
         if(b.dataset.f!=='all') list = list.filter(t=>t.status===b.dataset.f);
         document.getElementById('trList').innerHTML = renderTransferCards(list);
       });
