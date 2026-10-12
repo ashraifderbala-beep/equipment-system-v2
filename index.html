@@ -132,12 +132,18 @@ try{ sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); }catch(e){ con
 
 function locType(name){
   if(!name) return 'project';
-  if(name.includes('ورش')){
-    if(name.includes('العاصم')) return 'workshop_capital';
+  if(name.includes('المركزي')){
     if(name.includes('السويس')) return 'workshop_suez';
-    return 'workshop_external';
+    if(name.includes('العاصم')) return 'workshop_capital';
   }
   return 'project';
+}
+// النوع الفعلي للموقع: يصحح القيم القديمة المخزنة (مثل ورشة الشدة المعدنية التي كانت تُعامل كورشة مركزية)
+function effLocType(name, stored){
+  const t = locType(name);
+  if(t!=='project') return t;
+  if(ALL_LOCATIONS.includes(name) || customProjects.includes(name)) return 'project';
+  return stored==='workshop_external' ? 'workshop_external' : 'project';
 }
 function isExternalRepair(t){ return t.transferType==='repair' && t.toLocationType!=='workshop_capital' && t.toLocationType!=='workshop_suez'; }
 function locLabel(t){
@@ -164,6 +170,27 @@ function statusBadgeClass(s){
   return 'b-pending';
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ---------- قوائم قابلة للبحث بالكتابة ----------
+function enhanceSearchable(sel){
+  if(!sel || sel.dataset.enh) return;
+  sel.dataset.enh = '1';
+  const all = Array.from(sel.options).map(o=>({value:o.value, text:o.textContent}));
+  const box = document.createElement('input');
+  box.type = 'text'; box.autocomplete = 'off';
+  box.placeholder = '🔍 اكتب جزءاً من الاسم أو الكود للبحث...';
+  box.style.marginBottom = '6px';
+  sel.parentNode.insertBefore(box, sel);
+  function rebuild(){
+    const q = box.value.trim().toLowerCase();
+    const cur = sel.value;
+    const opts = all.filter((o,i)=> i===0 || o.value===cur || !q || o.text.toLowerCase().includes(q));
+    sel.innerHTML = opts.map(o=>`<option value="${esc(o.value)}"${o.value===cur?' selected':''}>${esc(o.text)}</option>`).join('');
+    if(q) sel.setAttribute('size', String(Math.min(opts.length, 7))); else sel.removeAttribute('size');
+  }
+  box.addEventListener('input', rebuild);
+  sel.addEventListener('change', ()=>{ box.value=''; rebuild(); });
+}
 
 // ---------- حقول التاريخ (يوم/شهر/سنة) ----------
 function isoToDMY(iso){ const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(iso||''); return m ? m[3]+'/'+m[2]+'/'+m[1] : (iso||''); }
@@ -227,14 +254,14 @@ async function fetchAll(){
 }
 function eqFromRow(r){
   return {id:r.code, code:r.code, name:r.name, brand:r.brand, model:r.model, category:r.category, year:r.year,
-    license:r.license, project:r.project, locationType:r.location_type, status:r.status, chassis:r.chassis,
+    license:r.license, project:r.project, locationType:effLocType(r.project, r.location_type), status:r.status, chassis:r.chassis,
     eng:r.eng, driver:r.driver, transferCount:r.transfer_count, lastMoveAt:r.last_move_at,
     lastMaintenanceDate:r.last_maintenance_date, lastMaintenanceMeter:r.last_maintenance_meter,
     lastFilterChanged:r.last_filter_changed, accessories:r.accessories, photoAssetUrl:r.photo_url};
 }
 function trFromRow(r){
   return {id:r.id, equipmentCode:r.equipment_code, equipmentName:r.equipment_name, transferType:r.transfer_type,
-    fromLocation:r.from_location, fromLocationType:r.from_location_type, toLocation:r.to_location, toLocationType:r.to_location_type,
+    fromLocation:r.from_location, fromLocationType:effLocType(r.from_location, r.from_location_type), toLocation:r.to_location, toLocationType:effLocType(r.to_location, r.to_location_type),
     requestedBy:r.requested_by, requestedAt:r.requested_at, status:r.status, approvedBy:r.approved_by, approvedAt:r.approved_at,
     approvalNotes:r.approval_notes, partsAndSpares:r.parts_and_spares, photoAssetUrl:r.photo_url,
     lastMaintenanceDate:r.last_maintenance_date, lastMaintenanceMeter:r.last_maintenance_meter, lastFilterChanged:r.last_filter_changed,
@@ -451,6 +478,7 @@ function renderLogin(){
   document.getElementById('loginSel').addEventListener('change', (e)=>{
     document.getElementById('adminPassWrap').style.display = e.target.value===ADMIN_NAME ? '' : 'none';
   });
+  enhanceSearchable(document.getElementById('loginSel'));
   document.getElementById('loginBtn').onclick = async ()=>{
     const v = document.getElementById('loginSel').value;
     const errBox = document.getElementById('loginErr');
@@ -661,7 +689,7 @@ function renderNewTransfer(){
   <div class="card">
     <h3>طلب نقل معدة جديد</h3>
     <label>المعدة <span class="req">*</span></label>
-    <select id="ntEquip">
+    <select id="ntEquip" class="searchable">
       <option value="">-- اختر المعدة --</option>
       ${myEquipment.map(e=>`<option value="${esc(e.code)}">${esc(e.code)} - ${esc(e.name)} (${esc(e.project)})</option>`).join('')}
     </select>
@@ -714,7 +742,7 @@ function renderDestOptions(type){
   }
   let opts = `<option value="">-- اختر المشروع --</option>` + allProjectLocations().map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('');
   let extra = type==='mission' ? `<label>تاريخ العودة المتوقع</label>${dateField('ntMissionEnd','')}` : '';
-  return `<label>المشروع المستقبل <span class="req">*</span></label><select id="ntDest">${opts}</select>${extra}`;
+  return `<label>المشروع المستقبل <span class="req">*</span></label><select id="ntDest" class="searchable">${opts}</select>${extra}`;
 }
 
 // ---------- TRANSFERS LIST ----------
@@ -1474,6 +1502,7 @@ async function deleteProject(name){
 // ---------- HANDLERS ----------
 function attachHandlers(){
   renderNotifBell();
+  document.querySelectorAll('select.searchable').forEach(enhanceSearchable);
   if(currentTab==='reports'){ setTimeout(initReportCharts, 0); } else { destroyCharts(); }
   document.querySelectorAll('[id^="laborRows_"]').forEach(el=>{
     const id = el.id.replace('laborRows_','');
@@ -1494,6 +1523,7 @@ function attachHandlers(){
       destWrap.innerHTML = renderDestOptions(ntType.value);
       document.getElementById('ntPermanentWrap').style.display = ntType.value==='permanent' ? '' : 'none';
       document.getElementById('ntRepairWrap').style.display = ntType.value==='repair' ? '' : 'none';
+      enhanceSearchable(document.querySelector('#ntDest.searchable'));
       const destSel = document.getElementById('ntDest');
       if(destSel && ntType.value==='repair'){
         destSel.addEventListener('change', ()=>{
