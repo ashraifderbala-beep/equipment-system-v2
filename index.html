@@ -118,7 +118,7 @@ const ADMIN_EMAIL = 'admin@equipment-system.local'; // أنشئ هذا المس�
 const EMAILJS_PUBLIC_KEY = 'hz365H8KjhaUSCuX7';
 const EMAILJS_SERVICE_ID = 'service_4nicw1x';
 const EMAILJS_TEMPLATE_ID = 'template_62vbi5d';
-const ADMIN_NOTIFY_EMAILS = ['ashraif8@gmail.com', 'ahmed.mohsen@siac-construction.com', 'Ehab.sadek@siac-construction.com']; // ضع هنا كل إيميلات الإدارة المطلوب تنبيهها
+const ADMIN_NOTIFY_EMAILS = ['ashraif8@gmail.com', 'ahmed.mohsen@siac-egypt.com', 'Ehab.sadek@siac-construction.com']; // ضع هنا كل إيميلات الإدارة المطلوب تنبيهها
 try{ if(window.emailjs && !EMAILJS_PUBLIC_KEY.startsWith('YOUR_')) emailjs.init(EMAILJS_PUBLIC_KEY); }catch(e){ console.warn('emailjs init failed', e); }
 // ======================================================
 
@@ -164,7 +164,8 @@ function daysBetween(a,b){
 }
 function statusBadgeClass(s){
   if(!s) return '';
-  if(s.includes('Repair') || s.includes('اصلاح')) return 'b-repair';
+  if(s.includes('جاهز')) return 'b-working';
+  if(s.includes('Repair') || s.includes('اصلاح') || s.includes('إصلاح')) return 'b-repair';
   if(s.includes('Scrap') || s.includes('Total Loss')) return 'b-scrap';
   if(s.includes('Working')||s.includes('Ready')) return 'b-working';
   return 'b-pending';
@@ -255,7 +256,7 @@ async function fetchAll(){
 function eqFromRow(r){
   return {id:r.code, code:r.code, name:r.name, brand:r.brand, model:r.model, category:r.category, year:r.year,
     license:r.license, project:r.project, locationType:effLocType(r.project, r.location_type), status:r.status, chassis:r.chassis,
-    eng:r.eng, driver:r.driver, transferCount:r.transfer_count, lastMoveAt:r.last_move_at,
+    eng:r.eng, driver:r.driver, transferCount:r.transfer_count, lastMoveAt:r.last_move_at, statusUpdatedBy:r.status_updated_by, statusUpdatedAt:r.status_updated_at,
     lastMaintenanceDate:r.last_maintenance_date, lastMaintenanceMeter:r.last_maintenance_meter,
     lastFilterChanged:r.last_filter_changed, accessories:r.accessories, photoAssetUrl:r.photo_url};
 }
@@ -554,7 +555,9 @@ function setTab(t){ currentTab=t; render(); window.scrollTo(0,0); }
 // ---------- DASHBOARD ----------
 function scopedEquipment(){
   const eq = equipList();
-  return currentUser.role==='admin' ? eq : eq.filter(e=>e.project===currentUser.name);
+  if(currentUser.role==='admin') return eq;
+  if(currentUser.role==='workshop') return eq.filter(e=>e.locationType===locType(currentUser.name));
+  return eq.filter(e=>e.project===currentUser.name);
 }
 function scopedTransfers(){
   const tr = transferList();
@@ -879,6 +882,7 @@ async function decideTransfer(id, approve){
   let newStatus = eqData.status;
   if(isReturn) newStatus = 'Working';
   else if(t.transferType==='repair') newStatus = 'تحت الإصلاح';
+  else if(workshopStateOf(eqData.status)==='ready') newStatus = 'Working';
   const {error:e1} = await sb.from('equipment').update({
     project: destLocation, location_type: destType, status: newStatus,
     transfer_count: (eqData.transferCount||0)+1, last_move_at: new Date().toISOString()
@@ -898,11 +902,67 @@ async function decideTransfer(id, approve){
 }
 
 // ---------- WORKSHOP TAB ----------
+let wsEqQuery = '', wsEqFilter = '';
+function renderWorkshopInventory(type){
+  const list = equipList().filter(e=>e.locationType===type);
+  const c = {ready:0, repair:0, unset:0};
+  list.forEach(e=>{ c[workshopStateOf(e.status)]++; });
+  const sel = v => wsEqFilter===v ? ' selected' : '';
+  return `<div class="card">
+    <h3>المعدات المسجلة في الورشة (${list.length})</h3>
+    <div class="muted" style="margin-bottom:8px;">حدّد لكل معدة: جاهزة للتوزيع أو تحت الإصلاح. &nbsp; 🟢 ${c.ready} جاهزة &nbsp;•&nbsp; 🔴 ${c.repair} تحت الإصلاح &nbsp;•&nbsp; ⚪ ${c.unset} غير محددة</div>
+    <div class="row noprint">
+      <input id="wsEqSearch" placeholder="بحث بالكود أو الاسم..." value="${esc(wsEqQuery)}" oninput="wsEqQuery=this.value;fillWorkshopEq()">
+      <select id="wsEqFilter" onchange="wsEqFilter=this.value;fillWorkshopEq()">
+        <option value="">كل الحالات</option>
+        <option value="ready"${sel('ready')}>جاهزة للتوزيع</option>
+        <option value="repair"${sel('repair')}>تحت الإصلاح</option>
+        <option value="unset"${sel('unset')}>غير محددة</option>
+      </select>
+    </div>
+    <div class="tablewrap" style="margin-top:8px;"><table><thead><tr><th>الكود</th><th>الاسم</th><th>الحالة الحالية</th><th>تحديد الحالة</th><th>آخر تحديث</th></tr></thead>
+    <tbody id="wsEqBody" data-type="${type}"></tbody></table></div>
+  </div>`;
+}
+function fillWorkshopEq(){
+  const body = document.getElementById('wsEqBody'); if(!body) return;
+  const type = body.dataset.type;
+  const q = (wsEqQuery||'').trim().toLowerCase();
+  let list = equipList().filter(e=>e.locationType===type);
+  if(q) list = list.filter(e=>(e.code||'').toLowerCase().includes(q) || (e.name||'').toLowerCase().includes(q));
+  if(wsEqFilter) list = list.filter(e=>workshopStateOf(e.status)===wsEqFilter);
+  list.sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
+  body.innerHTML = list.slice(0,400).map(e=>{
+    const st = workshopStateOf(e.status);
+    return `<tr>
+      <td>${esc(e.code)}</td><td>${esc(e.name)}</td>
+      <td><span class="badge ${statusBadgeClass(e.status)}">${esc(e.status)}</span></td>
+      <td><select onchange="setWorkshopEquipState('${esc(e.code)}', this.value)">
+        <option value=""${st==='unset'?' selected':''}>— اختر —</option>
+        <option value="جاهزة للتوزيع"${st==='ready'?' selected':''}>🟢 جاهزة للتوزيع</option>
+        <option value="تحت الإصلاح"${st==='repair'?' selected':''}>🔴 تحت الإصلاح</option>
+      </select></td>
+      <td class="muted">${e.statusUpdatedBy? esc(e.statusUpdatedBy)+' - '+fmtDate(e.statusUpdatedAt) : '—'}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="5" class="empty">لا توجد معدات</td></tr>';
+}
+async function setWorkshopEquipState(code, value){
+  if(!value) return;
+  const {data, error} = await sb.from('equipment')
+    .update({status:value, status_updated_by:currentUser.name, status_updated_at:new Date().toISOString()})
+    .eq('code', code).select('code');
+  if(error || !data || !data.length){
+    console.error(error);
+    alert('تعذر حفظ الحالة. تأكد من تشغيل ملف migration_5_workshop_status.sql في Supabase مرة واحدة.');
+  }
+  await fetchAll(); render();
+}
 function renderWorkshopTab(workshopName){
   const type = locType(workshopName);
   const list = transferList().filter(t=>t.transferType==='repair' && t.toLocationType===type && ['in_workshop','ready_return','completed'].includes(t.status));
-  if(!list.length) return '<div class="card empty">لا توجد معدات في هذه الورشة حالياً</div>';
-  return list.map(t=>renderWorkshopCard(t)).join('');
+  const inv = currentUser.role==='workshop' ? renderWorkshopInventory(type) : '';
+  if(!list.length) return inv + '<div class="card empty">لا توجد معدات في هذه الورشة حالياً</div>';
+  return inv + list.map(t=>renderWorkshopCard(t)).join('');
 }
 function renderExternalRepairs(){
   const list = transferList().filter(t=>isExternalRepair(t) && ['in_workshop','ready_return','completed'].includes(t.status) && (currentUser.role==='admin' || t.fromLocation===currentUser.name));
@@ -1088,9 +1148,82 @@ async function finishRepair(id){
 }
 
 // ---------- REPORTS ----------
+// ---------- فترة التقرير وملخص الورش ----------
+let reportFrom = '', reportTo = '';
+function localISODate(v){
+  if(!v) return '';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  const d = new Date(v); if(isNaN(d)) return '';
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+function inReportPeriod(v){
+  if(!reportFrom && !reportTo) return true;
+  const d = localISODate(v); if(!d) return false;
+  if(reportFrom && d<reportFrom) return false;
+  if(reportTo && d>reportTo) return false;
+  return true;
+}
+function reportTransfers(){ return transferList().filter(t=>inReportPeriod(t.requestedAt)); }
+function exitDateOf(t){ return t.exitDate || localISODate(t.lockedAt); }
+function reportMonths(){
+  const now = new Date();
+  let start, end;
+  if(reportFrom || reportTo){
+    const t = reportTo ? new Date(reportTo+'T00:00:00') : now;
+    end = new Date(t.getFullYear(), t.getMonth(), 1);
+    if(reportFrom){ const f = new Date(reportFrom+'T00:00:00'); start = new Date(f.getFullYear(), f.getMonth(), 1); }
+    else start = new Date(end.getFullYear(), end.getMonth()-11, 1);
+  } else {
+    end = new Date(now.getFullYear(), now.getMonth(), 1);
+    start = new Date(end.getFullYear(), end.getMonth()-11, 1);
+  }
+  const months = [];
+  for(let d=new Date(start); d<=end; d=new Date(d.getFullYear(), d.getMonth()+1, 1)){
+    months.push({key: d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'), label: d.toLocaleDateString('ar-EG',{month:'short',year:'2-digit'})});
+  }
+  return months.slice(-36);
+}
+function applyReportPeriod(){
+  const f = getDate('repFrom'), t = getDate('repTo');
+  if(f===null || t===null){ alert('اكتب التاريخ بالشكل: يوم/شهر/سنة مثال 25/09/2026'); return; }
+  if(f && t && f>t){ alert('تاريخ البداية يجب أن يكون قبل تاريخ النهاية'); return; }
+  reportFrom = f; reportTo = t; render();
+}
+function resetReportPeriod(){ reportFrom=''; reportTo=''; render(); }
+function periodLabel(){
+  if(!reportFrom && !reportTo) return 'كل الفترات';
+  return 'من '+(reportFrom? isoToDMY(reportFrom) : 'البداية')+' إلى '+(reportTo? isoToDMY(reportTo) : 'اليوم');
+}
+// حالة المعدة داخل الورشة: جاهزة للتوزيع / تحت الإصلاح / غير محددة
+function workshopStateOf(status){
+  const s = String(status||'').toLowerCase();
+  if(s.includes('جاهز') || s==='ready') return 'ready';
+  if(s.includes('repair') || s.includes('اصلاح') || s.includes('إصلاح')) return 'repair';
+  return 'unset';
+}
+function workshopSummary(){
+  const allTr = transferList(), tr = reportTransfers(), eq = equipList();
+  const inSet = ['in_workshop','ready_return','completed'];
+  const defs = [['workshop_suez','ورشة السويس'],['workshop_capital','ورشة العاصمة الإدارية']];
+  const rows = defs.map(([key,name])=>{
+    const list = eq.filter(e=>e.locationType===key);
+    const st = {ready:0, repair:0, unset:0};
+    list.forEach(e=>{ st[workshopStateOf(e.status)]++; });
+    return {key, name,
+      toCount: tr.filter(t=>t.transferType==='repair' && t.toLocationType===key && inSet.includes(t.status)).length,
+      outCount: allTr.filter(t=>t.transferType==='repair' && t.toLocationType===key && t.status==='completed' && inReportPeriod(exitDateOf(t))).length,
+      total: list.length, ready: st.ready, repair: st.repair, unset: st.unset};
+  });
+  const extCount = tr.filter(t=>isExternalRepair(t) && inSet.includes(t.status)).length;
+  return {rows, extCount};
+}
+
 function renderReports(){
   const eq = equipList();
-  const tr = transferList();
+  const allTr = transferList();
+  const tr = reportTransfers();
+  const ws = workshopSummary();
+  const periodOn = !!(reportFrom || reportTo);
   const byType = {permanent:0, mission:0, repair:0};
   tr.forEach(t=> byType[t.transferType] = (byType[t.transferType]||0)+1 );
   const completedRepairs = tr.filter(t=>t.transferType==='repair' && t.entryDate && t.exitDate);
@@ -1105,7 +1238,14 @@ function renderReports(){
   const currentlyInWorkshop = eq.filter(e=>e.locationType && e.locationType.startsWith('workshop'));
   const byProjectCount = {};
   eq.forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
-  const topMoved = eq.slice().sort((a,b)=>(b.transferCount||0)-(a.transferCount||0)).slice(0,10).filter(e=>e.transferCount>0);
+  let topMoved;
+  if(periodOn){
+    const mc = {};
+    tr.filter(t=>!['pending','rejected'].includes(t.status)).forEach(t=>{ mc[t.equipmentCode]=(mc[t.equipmentCode]||0)+1; });
+    topMoved = Object.entries(mc).sort((a,b)=>b[1]-a[1]).slice(0,10).map(([code,n])=>({code, name:(equipmentMap[code]||{}).name||code, transferCount:n}));
+  } else {
+    topMoved = eq.slice().sort((a,b)=>(b.transferCount||0)-(a.transferCount||0)).slice(0,10).filter(e=>e.transferCount>0);
+  }
 
   // إجمالي أيام التعطل لكل معدة (كل عمليات الإصلاح المكتملة أو الجارية)
   const downtimeMap = {};
@@ -1117,12 +1257,7 @@ function renderReports(){
     .map(([code,days])=>({code, name:(equipmentMap[code]||{}).name || code, days}));
 
   // اتجاه النقل الشهري (آخر 12 شهراً)
-  const months = [];
-  const now = new Date();
-  for(let i=11;i>=0;i--){
-    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
-    months.push({key: d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'), label: d.toLocaleDateString('ar-EG',{month:'short',year:'2-digit'})});
-  }
+  const months = reportMonths();
   const monthlyCounts = months.map(m=> tr.filter(t=>t.requestedAt && t.requestedAt.slice(0,7)===m.key).length );
 
   // أكثر المشاريع مصدراً لطلبات النقل
@@ -1151,6 +1286,16 @@ function renderReports(){
     <button class="secondary" onclick="printReport()">🖨️ طباعة هذا التقرير</button>
     <button class="secondary" onclick="exportReportExcel()">📊 تصدير إلى Excel</button>
   </div>
+  <div class="card noprint">
+    <h3>📅 فترة التقرير</h3>
+    <div class="row">
+      <div><label>من تاريخ</label>${dateField('repFrom', reportFrom)}</div>
+      <div><label>إلى تاريخ</label>${dateField('repTo', reportTo)}</div>
+      <div style="display:flex;gap:8px;align-items:flex-end;"><button onclick="applyReportPeriod()">تطبيق</button><button class="secondary" onclick="resetReportPeriod()">كل الفترات</button></div>
+    </div>
+    <div class="hint">الفترة تطبَّق على طلبات النقل والتكاليف والحوافز والرسوم (حسب تاريخ الطلب)، وعلى الخروج من الورش (حسب تاريخ الخروج). أرقام المخزون الحالي داخل الورش تعكس الوضع اللحظي.</div>
+  </div>
+  <div class="muted" style="margin-bottom:10px;"><b>الفترة:</b> ${periodLabel()} &nbsp;|&nbsp; <b>تاريخ إصدار التقرير:</b> ${fmtDate(new Date().toISOString())}</div>
   <div class="grid-stats">
     <div class="stat"><b>${byType.permanent||0}</b><span>عمليات نقل دائم</span></div>
     <div class="stat"><b>${byType.mission||0}</b><span>عمليات مأمورية</span></div>
@@ -1160,6 +1305,22 @@ function renderReports(){
     <div class="stat"><b>${extDur??'—'}</b><span>متوسط أيام الإصلاح - ورش خارجية</span></div>
     <div class="stat"><b>${totalRepairCost.toLocaleString()}</b><span>إجمالي تكلفة الإصلاحات (عمالة + قطع غيار)</span></div>
   </div>
+
+  <div class="section-title">🔧 ورش الإصلاح التابعة للشركة</div>
+  <div class="grid-stats">
+    ${ws.rows.map(r=>`<div class="stat"><b>${r.toCount}</b><span>معدات منقولة للإصلاح - ${r.name}</span></div>`).join('')}
+    <div class="stat"><b>${ws.rows.reduce((s,r)=>s+r.toCount,0)}</b><span>إجمالي المنقولة للإصلاح في الورشتين</span></div>
+    <div class="stat"><b>${ws.extCount}</b><span>منقولة لورش خارجية</span></div>
+  </div>
+  <div class="grid-stats" style="margin-top:12px;">
+    ${ws.rows.map(r=>`<div class="stat"><b>${r.outCount}</b><span>خرجت من ${r.name} بعد الإصلاح</span></div>`).join('')}
+    <div class="stat"><b>${ws.rows.reduce((s,r)=>s+r.outCount,0)}</b><span>إجمالي الخروج من الورشتين</span></div>
+  </div>
+  <div class="grid-stats" style="margin-top:12px;margin-bottom:14px;">
+    ${ws.rows.map(r=>`<div class="stat"><b>${r.total}</b><span>إجمالي المعدات المسجلة في ${r.name} (الوضع الحالي)</span>
+      <div style="margin-top:8px;font-size:13px;line-height:1.9;">🟢 جاهزة للتوزيع: <strong>${r.ready}</strong><br>🔴 تحت الإصلاح: <strong>${r.repair}</strong><br>⚪ غير محددة: <strong>${r.unset}</strong></div></div>`).join('')}
+  </div>
+  <p class="hint" style="margin-top:-6px;">"غير محددة" = معدات لم يحدد مهندس الورشة حالتها بعد (جاهزة للتوزيع أو تحت الإصلاح).</p>
 
   <div class="card">
     <h3>💰 تقرير حوافز الورشة (حسب الفني)</h3>
@@ -1171,7 +1332,7 @@ function renderReports(){
   </div>
 
   <div class="card">
-    <h3>اتجاه عمليات النقل خلال آخر 12 شهراً</h3>
+    <h3>اتجاه عمليات النقل (شهرياً)</h3>
     <div style="max-height:280px;"><canvas id="chartMonthly"></canvas></div>
   </div>
   <div class="two-col">
@@ -1189,7 +1350,7 @@ function renderReports(){
     <h3>المعدات الموجودة حالياً داخل الورش (${currentlyInWorkshop.length})</h3>
     <div class="tablewrap"><table><thead><tr><th>الكود</th><th>الاسم</th><th>الورشة</th><th>عدد الأيام منذ الدخول</th></tr></thead><tbody>
     ${currentlyInWorkshop.map(e=>{
-      const activeTr = tr.find(t=>t.equipmentCode===e.code && t.status==='in_workshop');
+      const activeTr = allTr.find(t=>t.equipmentCode===e.code && t.status==='in_workshop');
       const days = activeTr ? daysBetween(activeTr.entryDate||activeTr.approvedAt) : '—';
       return `<tr><td>${esc(e.code)}</td><td>${esc(e.name)}</td><td>${esc(e.project)}</td><td>${days}</td></tr>`;
     }).join('') || '<tr><td colspan="4" class="empty">لا توجد معدات في الورش حالياً</td></tr>'}
@@ -1216,13 +1377,8 @@ let chartInstances = {};
 function destroyCharts(){ Object.values(chartInstances).forEach(c=>{ try{c.destroy();}catch(e){} }); chartInstances={}; }
 function initReportCharts(){
   destroyCharts();
-  const eq = equipList(); const tr = transferList();
-  const months = [];
-  const now = new Date();
-  for(let i=11;i>=0;i--){
-    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
-    months.push({key: d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'), label: d.toLocaleDateString('ar-EG',{month:'short',year:'2-digit'})});
-  }
+  const eq = equipList(); const tr = reportTransfers();
+  const months = reportMonths();
   const monthlyCounts = months.map(m=> tr.filter(t=>t.requestedAt && t.requestedAt.slice(0,7)===m.key).length );
   const c1 = document.getElementById('chartMonthly');
   if(c1) chartInstances.monthly = new Chart(c1, {
@@ -1251,7 +1407,7 @@ function initReportCharts(){
   });
 }
 function exportReportExcel(){
-  const eq = equipList(); const tr = transferList();
+  const eq = equipList(); const tr = reportTransfers();
   const byProjectCount = {};
   eq.forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
   const workerStats = {};
@@ -1275,6 +1431,10 @@ function exportReportExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(distSheet), 'توزيع المواقع');
   const workerSheet = Object.entries(workerStats).map(([name,s])=>({'اسم الفني':name, الوظيفة:s.role, 'عدد الإصلاحات':s.repairs.size, 'إجمالي الساعات':s.hours, 'إجمالي التكلفة':s.cost})).sort((a,b)=>b['إجمالي التكلفة']-a['إجمالي التكلفة']);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(workerSheet), 'حوافز الورشة');
+  const wsx = workshopSummary();
+  const wsSheet = wsx.rows.map(r=>({'الورشة':r.name, 'منقولة للإصلاح (الفترة)':r.toCount, 'خرجت بعد الإصلاح (الفترة)':r.outCount, 'إجمالي المعدات الحالية':r.total, 'جاهزة للتوزيع':r.ready, 'تحت الإصلاح':r.repair, 'غير محددة':r.unset}));
+  wsSheet.push({'الورشة':'ورش خارجية', 'منقولة للإصلاح (الفترة)':wsx.extCount});
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(wsSheet), 'ملخص الورش');
   XLSX.writeFile(wb, 'تقرير_نظام_المعدات_'+new Date().toISOString().slice(0,10)+'.xlsx');
 }
 
@@ -1467,7 +1627,7 @@ function openEditEquipment(code){
       </div>
       <div><label>الحالة</label>
         <select id="editStatus">
-          ${['Working','Ready','Under Repair','تحت الإصلاح','Scrap'].map(s=>`<option value="${esc(s)}" ${s===e.status?'selected':''}>${esc(s)}</option>`).join('')}
+          ${['Working','Ready','جاهزة للتوزيع','Under Repair','تحت الإصلاح','Scrap'].map(s=>`<option value="${esc(s)}" ${s===e.status?'selected':''}>${esc(s)}</option>`).join('')}
         </select>
       </div>
     </div>
@@ -1531,6 +1691,7 @@ async function deleteProject(name){
 // ---------- HANDLERS ----------
 function attachHandlers(){
   renderNotifBell();
+  if(document.getElementById('wsEqBody')) fillWorkshopEq();
   document.querySelectorAll('select.searchable').forEach(enhanceSearchable);
   if(currentTab==='reports'){ setTimeout(initReportCharts, 0); } else { destroyCharts(); }
   document.querySelectorAll('[id^="laborRows_"]').forEach(el=>{
@@ -1681,6 +1842,10 @@ window.deleteProject = deleteProject;
 window.handleImportFile = handleImportFile;
 window.confirmImport = confirmImport;
 window.exportReportExcel = exportReportExcel;
+window.applyReportPeriod = applyReportPeriod;
+window.resetReportPeriod = resetReportPeriod;
+window.setWorkshopEquipState = setWorkshopEquipState;
+window.fillWorkshopEq = fillWorkshopEq;
 window.addLaborRow = addLaborRow;
 window.removeLabor = removeLabor;
 window.updateLabor = updateLabor;
