@@ -162,8 +162,38 @@ function daysBetween(a,b){
   const d1=new Date(a), d2=b?new Date(b):new Date();
   return Math.max(0, Math.round((d2-d1)/86400000));
 }
+// ---------- تصنيف حالة المعدة: فعّالة / مكهن / بيع / مسروق ----------
+function eqStateKind(status){
+  const s = String(status||'').trim(), l = s.toLowerCase();
+  if(s==='مكهن' || l.startsWith('scrap')) return 'scrap';
+  if(s==='بيع' || s==='مباع' || s==='مباعة') return 'sold';
+  if(s==='مسروق' || s==='مسروقة') return 'stolen';
+  return 'active';
+}
+function isActiveEq(e){ return eqStateKind(e.status)==='active'; }
+function assetCounts(list){
+  const c = {active:0, scrap:0, sold:0, stolen:0};
+  list.forEach(e=>{ c[eqStateKind(e.status)]++; });
+  return c;
+}
+function renderAssetCards(list){
+  const c = assetCounts(list);
+  return `<div class="grid-stats" style="margin-bottom:10px;">
+    <div class="stat"><b>${c.scrap}</b><span>مكهن</span></div>
+    <div class="stat"><b>${c.active}</b><span>باقي المعدات (بدون المكهن)</span></div>
+    <div class="stat"><b>${c.active+c.scrap}</b><span>إجمالي المعدات + المكهن</span></div>
+  </div>
+  <div class="muted" style="margin-bottom:10px;">غير محسوبة في الأعداد أعلاه: بيع (${c.sold}) • مسروق (${c.stolen})</div>`;
+}
+function statusOptionsFor(cur){
+  const base = ['Working','Ready','جاهزة للتوزيع','Under Repair','تحت الإصلاح','مكهن','بيع','مسروق'];
+  if(cur && !base.includes(cur)) base.push(cur);
+  return base;
+}
 function statusBadgeClass(s){
   if(!s) return '';
+  if(s==='مكهن' || s==='بيع' || s==='مباع') return 'b-scrap';
+  if(s==='مسروق') return 'b-repair';
   if(s.includes('جاهز')) return 'b-working';
   if(s.includes('Repair') || s.includes('اصلاح') || s.includes('إصلاح')) return 'b-repair';
   if(s.includes('Scrap') || s.includes('Total Loss')) return 'b-scrap';
@@ -572,8 +602,8 @@ function renderDashboard(){
   let stats;
   if(role==='admin'){
     stats = [
-      [allEq.length,'إجمالي المعدات'],
-      [allEq.filter(e=>e.locationType && e.locationType.startsWith('workshop')).length,'معدات داخل الورش حالياً'],
+      [allEq.filter(isActiveEq).length,'إجمالي المعدات (بدون المكهن)'],
+      [allEq.filter(e=>isActiveEq(e) && e.locationType && e.locationType.startsWith('workshop')).length,'معدات داخل الورش حالياً'],
       [tr.filter(t=>t.status==='pending').length,'طلبات نقل قيد الموافقة'],
       [tr.length,'إجمالي عمليات النقل المسجلة']
     ];
@@ -586,7 +616,7 @@ function renderDashboard(){
     ];
   } else {
     stats = [
-      [eq.length,'معدات مشروعي'],
+      [eq.filter(isActiveEq).length,'معدات مشروعي'],
       [tr.filter(t=>t.fromLocation===me && t.transferType==='repair' && away.includes(t.status)).length,'معدات مرسلة للإصلاح حالياً'],
       [tr.filter(t=>t.fromLocation===me && t.status==='pending').length,'طلبات نقل قيد الموافقة'],
       [tr.length,'إجمالي عمليات النقل']
@@ -601,9 +631,9 @@ function renderDashboard(){
     <h3>${role==='admin' ? 'أحدث طلبات النقل' : 'أحدث نشاط يخصّني'}</h3>
     ${recentTr.length? recentTr.map(t=>transferRowMini(t)).join('') : '<div class="empty">لا توجد طلبات نقل بعد</div>'}
   </div>
-  ${role==='project' ? `<div class="card"><h3>معداتي الحالية (${eq.length})</h3>
+  ${role==='project' ? `<div class="card"><h3>معداتي الحالية (${eq.filter(isActiveEq).length})</h3>
     <div class="tablewrap"><table><thead><tr><th>الكود</th><th>الاسم</th><th>الحالة</th></tr></thead><tbody>
-    ${eq.slice(0,15).map(e=>`<tr><td>${esc(e.code)}</td><td>${esc(e.name)}</td><td><span class="badge ${statusBadgeClass(e.status)}">${esc(e.status)}</span></td></tr>`).join('')||''}
+    ${eq.filter(isActiveEq).slice(0,15).map(e=>`<tr><td>${esc(e.code)}</td><td>${esc(e.name)}</td><td><span class="badge ${statusBadgeClass(e.status)}">${esc(e.status)}</span></td></tr>`).join('')||''}
     </tbody></table></div></div>` : ''}
   `;
 }
@@ -627,13 +657,15 @@ function transferStatusBadge(t){
 function renderEquipmentList(){
   let eq = scopedEquipment();
   const isAdmin = currentUser.role==='admin';
+  const statusOpts = Array.from(new Set(eq.map(e=>e.status))).filter(s=>s && eqStateKind(s)==='active').concat(['مكهن','بيع','مسروق']);
   return `
+  ${renderAssetCards(eq)}
   <div class="card noprint">
-    ${isAdmin ? '' : `<div class="muted" style="margin-bottom:8px;">معدات ${esc(currentUser.name)} فقط (${eq.length})</div>`}
+    ${isAdmin ? '' : `<div class="muted" style="margin-bottom:8px;">معدات ${esc(currentUser.name)} فقط (${eq.filter(isActiveEq).length})</div>`}
     <div class="row">
       <input id="eqSearch" placeholder="بحث بالكود أو الاسم...">
       ${isAdmin ? `<select id="eqProjFilter"><option value="">كل المواقع</option>${allLoginLocations().map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('')}</select>` : ''}
-      <select id="eqStatusFilter"><option value="">كل الحالات</option>${Array.from(new Set(eq.map(e=>e.status))).filter(Boolean).map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select>
+      <select id="eqStatusFilter"><option value="">كل الحالات</option>${statusOpts.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('')}</select>
     </div>
   </div>
   <div class="tablewrap card" style="padding:0;">
@@ -650,7 +682,12 @@ function fillEquipmentTable(){
   let eq = scopedEquipment();
   if(q) eq = eq.filter(e=>(e.code||'').toLowerCase().includes(q) || (e.name||'').toLowerCase().includes(q));
   if(pf) eq = eq.filter(e=>e.project===pf);
-  if(sf) eq = eq.filter(e=>e.status===sf);
+  if(sf){
+    if(sf==='مكهن') eq = eq.filter(e=>eqStateKind(e.status)==='scrap');
+    else if(sf==='بيع') eq = eq.filter(e=>eqStateKind(e.status)==='sold');
+    else if(sf==='مسروق') eq = eq.filter(e=>eqStateKind(e.status)==='stolen');
+    else eq = eq.filter(e=>e.status===sf);
+  }
   eq.sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
   tbody.innerHTML = eq.slice(0,400).map(e=>`
     <tr>
@@ -716,7 +753,7 @@ function printReport(){
 
 // ---------- NEW TRANSFER ----------
 function renderNewTransfer(){
-  const myEquipment = currentUser.role==='admin' ? equipList() : equipList().filter(e=>e.project===currentUser.name);
+  const myEquipment = (currentUser.role==='admin' ? equipList() : equipList().filter(e=>e.project===currentUser.name)).filter(isActiveEq);
   return `
   <div class="card">
     <h3>طلب نقل معدة جديد</h3>
@@ -904,7 +941,7 @@ async function decideTransfer(id, approve){
 // ---------- WORKSHOP TAB ----------
 let wsEqQuery = '', wsEqFilter = '';
 function renderWorkshopInventory(type){
-  const list = equipList().filter(e=>e.locationType===type);
+  const list = equipList().filter(e=>isActiveEq(e) && e.locationType===type);
   const c = {ready:0, repair:0, unset:0};
   list.forEach(e=>{ c[workshopStateOf(e.status)]++; });
   const sel = v => wsEqFilter===v ? ' selected' : '';
@@ -928,7 +965,7 @@ function fillWorkshopEq(){
   const body = document.getElementById('wsEqBody'); if(!body) return;
   const type = body.dataset.type;
   const q = (wsEqQuery||'').trim().toLowerCase();
-  let list = equipList().filter(e=>e.locationType===type);
+  let list = equipList().filter(e=>isActiveEq(e) && e.locationType===type);
   if(q) list = list.filter(e=>(e.code||'').toLowerCase().includes(q) || (e.name||'').toLowerCase().includes(q));
   if(wsEqFilter) list = list.filter(e=>workshopStateOf(e.status)===wsEqFilter);
   list.sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
@@ -1206,7 +1243,7 @@ function workshopSummary(){
   const inSet = ['in_workshop','ready_return','completed'];
   const defs = [['workshop_suez','ورشة السويس'],['workshop_capital','ورشة العاصمة الإدارية']];
   const rows = defs.map(([key,name])=>{
-    const list = eq.filter(e=>e.locationType===key);
+    const list = eq.filter(e=>isActiveEq(e) && e.locationType===key);
     const st = {ready:0, repair:0, unset:0};
     list.forEach(e=>{ st[workshopStateOf(e.status)]++; });
     return {key, name,
@@ -1235,9 +1272,9 @@ function renderReports(){
   const capitalDur = avgDuration(completedRepairs.filter(t=>t.toLocationType==='workshop_capital'));
   const suezDur = avgDuration(completedRepairs.filter(t=>t.toLocationType==='workshop_suez'));
   const extDur = avgDuration(completedRepairs.filter(t=>isExternalRepair(t)));
-  const currentlyInWorkshop = eq.filter(e=>e.locationType && e.locationType.startsWith('workshop'));
+  const currentlyInWorkshop = eq.filter(e=>isActiveEq(e) && e.locationType && e.locationType.startsWith('workshop'));
   const byProjectCount = {};
-  eq.forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
+  eq.filter(isActiveEq).forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
   let topMoved;
   if(periodOn){
     const mc = {};
@@ -1306,6 +1343,8 @@ function renderReports(){
     <div class="stat"><b>${totalRepairCost.toLocaleString()}</b><span>إجمالي تكلفة الإصلاحات (عمالة + قطع غيار)</span></div>
   </div>
 
+  <div class="section-title">📦 أصول الشركة</div>
+  ${renderAssetCards(eq)}
   <div class="section-title">🔧 ورش الإصلاح التابعة للشركة</div>
   <div class="grid-stats">
     ${ws.rows.map(r=>`<div class="stat"><b>${r.toCount}</b><span>معدات منقولة للإصلاح - ${r.name}</span></div>`).join('')}
@@ -1409,7 +1448,7 @@ function initReportCharts(){
 function exportReportExcel(){
   const eq = equipList(); const tr = reportTransfers();
   const byProjectCount = {};
-  eq.forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
+  eq.filter(isActiveEq).forEach(e=>{ byProjectCount[e.project] = (byProjectCount[e.project]||0)+1; });
   const workerStats = {};
   tr.forEach(t=>{
     (t.labor||[]).forEach(x=>{
@@ -1431,6 +1470,13 @@ function exportReportExcel(){
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(distSheet), 'توزيع المواقع');
   const workerSheet = Object.entries(workerStats).map(([name,s])=>({'اسم الفني':name, الوظيفة:s.role, 'عدد الإصلاحات':s.repairs.size, 'إجمالي الساعات':s.hours, 'إجمالي التكلفة':s.cost})).sort((a,b)=>b['إجمالي التكلفة']-a['إجمالي التكلفة']);
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(workerSheet), 'حوافز الورشة');
+  const ac = assetCounts(eq);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+    {'البند':'باقي المعدات (بدون المكهن)','العدد':ac.active},
+    {'البند':'مكهن','العدد':ac.scrap},
+    {'البند':'إجمالي المعدات + المكهن','العدد':ac.active+ac.scrap},
+    {'البند':'بيع (غير محسوب)','العدد':ac.sold},
+    {'البند':'مسروق (غير محسوب)','العدد':ac.stolen}]), 'ملخص الأصول');
   const wsx = workshopSummary();
   const wsSheet = wsx.rows.map(r=>({'الورشة':r.name, 'منقولة للإصلاح (الفترة)':r.toCount, 'خرجت بعد الإصلاح (الفترة)':r.outCount, 'إجمالي المعدات الحالية':r.total, 'جاهزة للتوزيع':r.ready, 'تحت الإصلاح':r.repair, 'غير محددة':r.unset}));
   wsSheet.push({'الورشة':'ورش خارجية', 'منقولة للإصلاح (الفترة)':wsx.extCount});
@@ -1469,7 +1515,7 @@ function renderManage(){
         <select id="addProject">${allLocs.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('')}</select>
       </div>
       <div><label>الحالة</label>
-        <select id="addStatus"><option value="Working">Working</option><option value="Ready">Ready</option><option value="Under Repair">Under Repair</option><option value="Scrap">Scrap</option></select>
+        <select id="addStatus"><option value="Working">Working</option><option value="Ready">Ready</option><option value="Under Repair">Under Repair</option><option value="مكهن">مكهن</option><option value="بيع">بيع</option><option value="مسروق">مسروق</option></select>
       </div>
     </div>
     <div class="two-col">
@@ -1627,7 +1673,7 @@ function openEditEquipment(code){
       </div>
       <div><label>الحالة</label>
         <select id="editStatus">
-          ${['Working','Ready','جاهزة للتوزيع','Under Repair','تحت الإصلاح','Scrap'].map(s=>`<option value="${esc(s)}" ${s===e.status?'selected':''}>${esc(s)}</option>`).join('')}
+          ${statusOptionsFor(e.status).map(s=>`<option value="${esc(s)}" ${s===e.status?'selected':''}>${esc(s)}</option>`).join('')}
         </select>
       </div>
     </div>
