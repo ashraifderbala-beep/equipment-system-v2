@@ -43,6 +43,7 @@ button:disabled{opacity:.5;cursor:not-allowed;}
 input,select,textarea{font-family:var(--font);background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:14px;width:100%;}
 textarea{min-height:70px;resize:vertical;}
 .dateinp{direction:ltr;text-align:center;letter-spacing:1px;}
+#refreshBanner{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--primary);color:var(--text);border-radius:12px;padding:10px 16px;box-shadow:0 6px 24px rgba(0,0,0,.25);z-index:60;font-size:13.5px;display:flex;align-items:center;gap:10px;max-width:92vw;}
 label{display:block;font-size:13px;color:var(--text-dim);margin:10px 0 4px;font-weight:600;}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:var(--shadow);}
 .row{display:flex;gap:10px;flex-wrap:wrap;}
@@ -339,17 +340,83 @@ async function ensureSeed(){
     }
   }catch(e){ console.warn('projects table missing - run migration_2 sql', e); }
 }
+// ---------- ثبات الشاشات: لا نعيد رسم الصفحة أثناء الكتابة ----------
+let formDirty = false, pendingRender = false, refreshTimer = null, refreshBase = null;
+function userTypingNow(){
+  const a = document.activeElement;
+  if(!a || !a.closest || !a.closest('#app')) return false;
+  if(a.tagName==='TEXTAREA' || a.tagName==='SELECT') return true;
+  if(a.tagName==='INPUT'){ return !['button','submit','checkbox','radio','file'].includes((a.type||'text').toLowerCase()); }
+  return false;
+}
+function showRefreshBanner(){
+  if(document.getElementById('refreshBanner')) return;
+  const b = document.createElement('div'); b.id = 'refreshBanner'; b.className = 'noprint';
+  b.innerHTML = '🔄 وصلت تحديثات جديدة، ولم تُطبَّق لحماية ما تكتبه الآن. <button class="small" onclick="render()">عرض التحديثات</button>';
+  document.body.appendChild(b);
+}
+function hideRefreshBanner(){ const b = document.getElementById('refreshBanner'); if(b) b.remove(); }
+function requestRender(){
+  if(formDirty || userTypingNow()){ pendingRender = true; showRefreshBanner(); }
+  else render();
+}
+function markDirty(e){
+  const el = e.target;
+  if(el && el.closest && el.closest('#app') && el.closest('[data-form]')) formDirty = true;
+}
+document.addEventListener('input', markDirty);
+document.addEventListener('change', markDirty);
+document.addEventListener('focusout', ()=>{
+  if(!pendingRender) return;
+  setTimeout(()=>{ if(pendingRender && !formDirty && !userTypingNow()) render(); }, 1200);
+});
+// دمج دفعة التحديثات اللحظية في تحديث واحد (يقلل الضغط على قاعدة البيانات)
+function scheduleRefresh(){
+  if(!refreshBase) refreshBase = transfersMap;
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async ()=>{
+    const base = refreshBase; refreshBase = null;
+    await fetchAll();
+    detectTransferNotifications(base, transfersMap);
+    requestRender();
+  }, 400);
+}
 function subscribeRealtime(){
   sb.channel('eq-changes')
-    .on('postgres_changes', {event:'*', schema:'public', table:'equipment'}, async ()=>{ await fetchAll(); render(); })
-    .on('postgres_changes', {event:'*', schema:'public', table:'transfers'}, async ()=>{
-      const oldMap = transfersMap;
-      await fetchAll();
-      detectTransferNotifications(oldMap, transfersMap);
-      render();
-    })
-    .on('postgres_changes', {event:'*', schema:'public', table:'projects'}, async ()=>{ await fetchAll(); render(); })
+    .on('postgres_changes', {event:'*', schema:'public', table:'equipment'}, scheduleRefresh)
+    .on('postgres_changes', {event:'*', schema:'public', table:'transfers'}, scheduleRefresh)
+    .on('postgres_changes', {event:'*', schema:'public', table:'projects'}, scheduleRefresh)
     .subscribe();
+}
+
+// ---------- منع تنفيذ نفس الإجراء مرتين ----------
+const inflight = new Set();
+async function once(key, fn){
+  if(inflight.has(key)) return;
+  inflight.add(key);
+  try{ return await fn(); } finally{ inflight.delete(key); }
+}
+
+// ---------- سجل العمليات (Audit Log) ----------
+const ACTION_LABELS = {
+  'transfer.create':'إنشاء طلب نقل', 'transfer.approve':'اعتماد نقل', 'transfer.reject':'رفض نقل',
+  'transfer.approve_return':'اعتماد عودة معدة', 'workshop.save':'حفظ تقرير ورشة', 'workshop.finish':'إنهاء إصلاح / طلب عودة',
+  'report.unlock':'فتح قفل تقرير', 'equipment.add':'إضافة معدة', 'equipment.edit':'تعديل معدة', 'equipment.status':'تغيير حالة معدة',
+  'equipment.archive':'أرشفة معدة', 'equipment.restore':'استرجاع معدة', 'equipment.import':'استيراد معدات',
+  'project.add':'إضافة مشروع', 'project.delete':'حذف مشروع', 'backup.download':'نسخة احتياطية', 'auth.login':'تسجيل دخول'
+};
+function roleLabel(r){ return {admin:'إدارة', workshop:'ورشة', project:'مشروع'}[r] || r || ''; }
+async function logAction(action, entityType, entityId, summary, details, equipmentCode){
+  // لا يوقف أي عملية إذا فشل التسجيل
+  try{
+    if(!currentUser) return;
+    const {error} = await sb.from('audit_log').insert({
+      actor: currentUser.name, role: currentUser.role, action,
+      entity_type: entityType || null, entity_id: entityId ? String(entityId) : null,
+      equipment_code: equipmentCode || null, summary: String(summary||'').slice(0,500), details: details || null
+    });
+    if(error) console.warn('audit log failed:', error.message);
+  }catch(e){ console.warn('audit log failed', e); }
 }
 
 function isEmailConfigured(){
@@ -557,6 +624,7 @@ function renderLogin(){
     else if(v===WORKSHOP_CAPITAL || v===WORKSHOP_SUEZ) role='workshop';
     currentUser = {name:v, role};
     localStorage.setItem('eq_user', JSON.stringify(currentUser));
+    try{ await Promise.race([logAction('auth.login','auth',null,'تسجيل دخول: '+v,{role}), new Promise(r=>setTimeout(r,1500))]); }catch(e){}
     location.reload();
   };
 }
@@ -565,6 +633,7 @@ async function logout(){ try{ await sb.auth.signOut(); }catch(e){} localStorage.
 // ---------- MAIN RENDER ----------
 function render(){
   if(!currentUser){ renderLogin(); return; }
+  formDirty = false; pendingRender = false; hideRefreshBanner();
   const role = currentUser.role;
   const tabs = [['dashboard','لوحة القيادة'],['equipment','المعدات']];
   if(role==='project' || role==='admin') tabs.push(['newtransfer','طلب نقل جديد']);
@@ -575,6 +644,7 @@ function render(){
   if(role==='admin') tabs.push(['workshops','متابعة الورش']);
   if(role==='admin') tabs.push(['reports','تقارير الإدارة']);
   if(role==='admin') tabs.push(['manage','إدارة المعدات والمشاريع']);
+  if(role==='admin') tabs.push(['audit','سجل العمليات']);
 
   let body = '';
   try{
@@ -588,6 +658,7 @@ function render(){
     else if(currentTab==='external') body = renderExternalRepairs();
     else if(currentTab==='reports') body = renderReports();
     else if(currentTab==='manage') body = renderManage();
+    else if(currentTab==='audit') body = renderAuditLog();
   }catch(e){ console.error(e); body = '<div class="card">حدث خطأ في عرض هذه الصفحة.</div>'; }
 
   app.innerHTML = `
@@ -612,7 +683,7 @@ function render(){
   `;
   attachHandlers();
 }
-function setTab(t){ currentTab=t; render(); window.scrollTo(0,0); }
+function setTab(t){ currentTab=t; render(); window.scrollTo(0,0); if(t==='audit') loadAuditLog(true); }
 
 // ---------- DASHBOARD ----------
 function scopedEquipment(){
@@ -762,9 +833,11 @@ async function openEquipmentDetail(code){
     ${e.photoAssetUrl ? `<img class="imgprev" src="${e.photoAssetUrl}">` : ''}
     <div class="section-title">سجل النقل (الهوستري)</div>
     <div id="histBox" class="timeline"><div class="muted">جارِ التحميل...</div></div>
+    ${currentUser.role==='admin' ? '<div class="section-title">سجل التعديلات والعمليات</div><div id="eqAuditBox" class="timeline"><div class="muted">جارِ التحميل...</div></div>' : ''}
     <div class="row noprint" style="margin-top:12px;"><button class="secondary" onclick="printModal()">🖨️ طباعة</button></div>
     </div>`;
   document.body.appendChild(modal);
+  if(currentUser.role==='admin') loadEquipmentAudit(e.code, modal);
   const {data, error} = await sb.from('transfers').select('*').eq('equipment_code', e.code).order('requested_at',{ascending:false});
   const histBox = modal.querySelector('#histBox');
   if(error || !data || !data.length){ histBox.innerHTML = '<div class="muted">لا يوجد سجل نقل سابق لهذه المعدة.</div>'; return; }
@@ -791,7 +864,7 @@ function printReport(){
 function renderNewTransfer(){
   const myEquipment = (currentUser.role==='admin' ? equipList() : equipList().filter(e=>e.project===currentUser.name)).filter(isActiveEq);
   return `
-  <div class="card">
+  <div class="card" data-form="1">
     <h3>طلب نقل معدة جديد</h3>
     <label>المعدة <span class="req">*</span></label>
     <select id="ntEquip" class="searchable">
@@ -936,16 +1009,32 @@ async function unlockReport(id){
   if(!confirm('فتح القفل يسمح بتعديل بيانات العمالة والقطع لهذا التقرير مرة أخرى. متابعة؟')) return;
   const {error} = await sb.from('transfers').update({report_locked:false}).eq('id', id);
   if(error){ alert('حدث خطأ: '+error.message); return; }
+  { const tt = transfersMap[id] || {};
+    logAction('report.unlock','transfer',id,'فتح قفل تقرير الورشة للمعدة '+(tt.equipmentName||'')+' ('+(tt.equipmentCode||'')+')',null, tt.equipmentCode); }
   await fetchAll(); render();
   document.querySelectorAll('.modal-bg').forEach(m=>m.remove());
 }
-async function decideTransfer(id, approve){
+function decideTransfer(id, approve){ return once('decide:'+id, ()=>decideTransferImpl(id, approve)); }
+// "حجز" الطلب بشكل ذري: يُنفَّذ فقط إذا كانت حالته لم تتغير (يمنع الاعتماد المزدوج من جهازين)
+async function claimTransfer(id, expectedStatus, patch){
+  const {data, error} = await sb.from('transfers').update(patch).eq('id', id).eq('status', expectedStatus).select('id');
+  if(error){ alert('حدث خطأ: '+error.message); return false; }
+  if(!data || !data.length){
+    alert('هذا الطلب تم البت فيه بالفعل من جهاز أو مستخدم آخر. سيتم تحديث الشاشة.');
+    await fetchAll(); render(); return false;
+  }
+  return true;
+}
+async function decideTransferImpl(id, approve){
   const t = transfersMap[id]; if(!t) return;
   const notes = document.getElementById('notes_'+id)?.value.trim() || '';
   if(!approve && !notes){ alert('يرجى كتابة سبب الرفض'); return; }
+  const nowIso = new Date().toISOString();
+  const what = `${typeLabel(t.transferType)} للمعدة ${t.equipmentName} (${t.equipmentCode}) من ${t.fromLocation} إلى ${t.toLocation}`;
   if(!approve){
-    const {error} = await sb.from('transfers').update({status:'rejected', approved_by: currentUser.name, approved_at:new Date().toISOString(), approval_notes:notes}).eq('id', id);
-    if(error){ alert('حدث خطأ: '+error.message); return; }
+    const ok = await claimTransfer(id, t.status, {status:'rejected', approved_by: currentUser.name, approved_at:nowIso, approval_notes:notes});
+    if(!ok) return;
+    logAction('transfer.reject','transfer',id,'رفض '+what,{notes}, t.equipmentCode);
     await fetchAll(); render(); return;
   }
   const isReturn = t.status==='ready_return';
@@ -956,21 +1045,32 @@ async function decideTransfer(id, approve){
   if(isReturn) newStatus = 'Working';
   else if(t.transferType==='repair') newStatus = 'تحت الإصلاح';
   else if(workshopStateOf(eqData.status)==='ready') newStatus = 'Working';
-  const {error:e1} = await sb.from('equipment').update({
-    project: destLocation, location_type: destType, status: newStatus,
-    transfer_count: (eqData.transferCount||0)+1, last_move_at: new Date().toISOString()
-  }).eq('code', t.equipmentCode);
-  if(e1){ alert('تعذر تحديث بيانات المعدة (تأكد من تسجيل الدخول كإدارة): '+e1.message); return; }
   const newTrStatus = isReturn ? 'completed' : (t.transferType==='repair' ? 'in_workshop' : 'approved');
-  const trPatch = {status:newTrStatus, approved_by: currentUser.name, approved_at:new Date().toISOString(), approval_notes:notes};
+  const trPatch = {status:newTrStatus, approved_by: currentUser.name, approved_at:nowIso, approval_notes:notes};
   if(isReturn){
     // اعتماد نهائي لإعادة المعدة = قفل تقرير الورشة نهائياً (يحمي بيانات العمالة والحوافز من أي تعديل لاحق)
     trPatch.report_locked = true;
     trPatch.locked_by = currentUser.name;
-    trPatch.locked_at = new Date().toISOString();
+    trPatch.locked_at = nowIso;
   }
-  const {error:e2} = await sb.from('transfers').update(trPatch).eq('id', id);
-  if(e2){ alert('حدث خطأ: '+e2.message); return; }
+  const prev = {status:t.status, approved_by:t.approvedBy||null, approved_at:t.approvedAt||null, approval_notes:t.approvalNotes||null,
+                report_locked:!!t.reportLocked, locked_by:t.lockedBy||null, locked_at:t.lockedAt||null};
+  // 1) حجز الطلب أولاً (ذري)
+  const claimed = await claimTransfer(id, t.status, trPatch);
+  if(!claimed) return;
+  // 2) نقل المعدة، ولو فشل نتراجع عن الحجز حتى لا يبقى الطلب معتمداً بدون انتقال فعلي
+  const {error:e1} = await sb.from('equipment').update({
+    project: destLocation, location_type: destType, status: newStatus,
+    transfer_count: (eqData.transferCount||0)+1, last_move_at: nowIso
+  }).eq('code', t.equipmentCode);
+  if(e1){
+    await sb.from('transfers').update(prev).eq('id', id);
+    alert('تعذر تحديث بيانات المعدة (تأكد من تسجيل الدخول كإدارة). تم التراجع عن الاعتماد: '+e1.message);
+    await fetchAll(); render(); return;
+  }
+  logAction(isReturn ? 'transfer.approve_return' : 'transfer.approve', 'transfer', id,
+    (isReturn ? 'اعتماد عودة المعدة '+t.equipmentName+' ('+t.equipmentCode+') من الورشة إلى '+t.fromLocation : 'اعتماد '+what),
+    {notes, new_status:newStatus, to:destLocation}, t.equipmentCode);
   await fetchAll(); render();
 }
 
@@ -1021,12 +1121,15 @@ function fillWorkshopEq(){
 }
 async function setWorkshopEquipState(code, value){
   if(!value) return;
+  const oldStatus = (equipmentMap[code]||{}).status;
   const {data, error} = await sb.from('equipment')
     .update({status:value, status_updated_by:currentUser.name, status_updated_at:new Date().toISOString()})
     .eq('code', code).select('code');
   if(error || !data || !data.length){
     console.error(error);
     alert('تعذر حفظ الحالة. تأكد من تشغيل ملف migration_5_workshop_status.sql في Supabase مرة واحدة.');
+  } else {
+    logAction('equipment.status','equipment',code,'تغيير حالة المعدة '+((equipmentMap[code]||{}).name||'')+' ('+code+') من «'+(oldStatus||'—')+'» إلى «'+value+'»',{from:oldStatus||null,to:value}, code);
   }
   await fetchAll(); render();
 }
@@ -1127,7 +1230,7 @@ function renderWorkshopCard(t){
   const state = ensureWorkState(t);
   const {laborTotal, partsTotal, grand} = calcTotals(state);
   const external = isExternalRepair(t);
-  return `<div class="card">
+  return `<div class="card" data-form="1">
     <div class="top" style="margin-bottom:6px;">
       <div><b>${esc(t.equipmentName)}</b> <span class="muted">(${esc(t.equipmentCode)})</span></div>
       ${transferStatusBadge(t)}
@@ -1194,10 +1297,13 @@ async function saveWorkshopReport(id){
   }
   const {error} = await sb.from('transfers').update(patch).eq('id', id);
   if(error){ alert('حدث خطأ: '+error.message); return; }
+  { const tt = transfersMap[id] || {};
+    logAction('workshop.save','transfer',id,'حفظ تقرير الورشة للمعدة '+(tt.equipmentName||'')+' ('+(tt.equipmentCode||'')+')',{labor:labor.length, parts:parts.length, invoices:(patch.invoices||tt.invoices||[]).length}, tt.equipmentCode); }
   await fetchAll(); render();
   alert('تم الحفظ');
 }
-async function finishRepair(id){
+function finishRepair(id){ return once('finish:'+id, ()=>finishRepairImpl(id)); }
+async function finishRepairImpl(id){
   const savedOk = await saveWorkshopReport(id);
   if(savedOk===false) return;
   if(!confirm('سيتم إرسال طلب إعادة المعدة للإدارة للموافقة. متابعة؟')) return;
@@ -1217,6 +1323,7 @@ async function finishRepair(id){
       (isExt ? `المشروع "${currentUser.name}" استلم المعدة من الورشة الخارجية "${t.toLocation}" بعد الإصلاح ويطلب اعتماد عودتها.\n\nمدة الإصلاح: ${daysBetween(t.entryDate,t.exitDate)} يوم\nما تم إصلاحه: ${t.workDone}` : `الورشة "${currentUser.name}" أنهت إصلاح المعدة وتطلب إعادتها للمشروع.\n\nالمعدة: ${t.equipmentName} (${t.equipmentCode})\nستعود إلى: ${t.fromLocation}\n\nيرجى الدخول للنظام لاعتماد إعادة المعدة.`)
     );
   }catch(mailErr){ console.warn('email notify failed (ignored)', mailErr); }
+  logAction('workshop.finish','transfer',id,(isExt?'استلام المعدة '+t.equipmentName+' من ورشة خارجية بعد الإصلاح':'إنهاء إصلاح المعدة '+t.equipmentName+' وطلب إعادتها')+' ('+t.equipmentCode+')',{exit_date:patch.exit_date||t.exitDate||null}, t.equipmentCode);
   await fetchAll(); render();
 }
 
@@ -1530,7 +1637,7 @@ function lastBackupText(){
 function renderManage(){
   const allLocs = [WORKSHOP_CAPITAL, WORKSHOP_SUEZ].concat(allProjectLocations());
   const archived = archivedList();
-  return `
+  return `<div data-form="1">
   <div class="card">
     <h3>💾 نسخة احتياطية كاملة</h3>
     <p class="muted">خطة Supabase المجانية لا تتضمن نسخاً احتياطية تلقائية، فخذ نسخة أسبوعياً على الأقل واحفظها في مكان آمن. النسخة تشمل المعدات (حتى المؤرشفة) وكل طلبات النقل بتفاصيلها والمشاريع.</p>
@@ -1603,10 +1710,121 @@ function renderManage(){
   </div>
 
   <div class="card">
-    <h3>تعديل أو حذف معدة موجودة</h3>
-    <p class="muted">من تبويب "المعدات" اضغط زر "تعديل" أو "حذف" بجانب أي معدة.</p>
+    <h3>تعديل أو أرشفة معدة موجودة</h3>
+    <p class="muted">من تبويب "المعدات" اضغط زر "تعديل" أو "أرشفة" بجانب أي معدة.</p>
+  </div>
   </div>`;
 }
+// ---------- عرض سجل العمليات (للإدارة) ----------
+let auditFilters = {from:'', to:'', action:'', actor:'', q:''};
+let auditState = {rows:[], done:false, loading:false, error:null};
+const AUDIT_PAGE = 100;
+function auditQuery(){
+  let q = sb.from('audit_log').select('*').order('at', {ascending:false}).order('id', {ascending:true});
+  const f = auditFilters;
+  if(f.from) q = q.gte('at', new Date(f.from+'T00:00:00').toISOString());
+  if(f.to) q = q.lte('at', new Date(f.to+'T23:59:59.999').toISOString());
+  if(f.action) q = q.eq('action', f.action);
+  if(f.actor) q = q.ilike('actor', '%'+f.actor.replace(/[%,]/g,'')+'%');
+  if(f.q) q = q.ilike('summary', '%'+f.q.replace(/[%,]/g,'')+'%');
+  return q;
+}
+function renderAuditLog(){
+  return `
+  <div class="card" data-form="1">
+    <h3>📜 سجل العمليات</h3>
+    <p class="muted">كل إجراء في النظام يُسجَّل تلقائياً (من فعله ومتى). السجل للإضافة فقط ولا يمكن لأي مستخدم تعديله أو حذفه. علامة 🔐 تعني أن العملية تمت من حساب الإدارة الموثّق.</p>
+    <div class="row">
+      <div><label>من تاريخ</label>${dateField('auFrom', auditFilters.from)}</div>
+      <div><label>إلى تاريخ</label>${dateField('auTo', auditFilters.to)}</div>
+      <div><label>نوع العملية</label><select id="auAction"><option value="">الكل</option>${Object.entries(ACTION_LABELS).map(([k,v])=>`<option value="${k}"${auditFilters.action===k?' selected':''}>${v}</option>`).join('')}</select></div>
+    </div>
+    <div class="row">
+      <div><label>المنفّذ (جزء من الاسم)</label><input id="auActor" value="${esc(auditFilters.actor)}"></div>
+      <div><label>بحث في الوصف</label><input id="auQ" value="${esc(auditFilters.q)}" placeholder="كود معدة أو اسم..."></div>
+      <div style="display:flex;gap:8px;align-items:flex-end;"><button onclick="applyAuditFilters()">تطبيق</button><button class="secondary" onclick="resetAuditFilters()">مسح</button><button class="secondary" onclick="exportAuditExcel()">📊 Excel</button></div>
+    </div>
+  </div>
+  <div class="card" style="padding:0;">
+    <div class="tablewrap"><table><thead><tr><th>الوقت</th><th>المنفّذ</th><th>العملية</th><th>الوصف</th><th></th></tr></thead><tbody id="auditTbody"></tbody></table></div>
+    <div id="auditFooter" style="padding:10px;text-align:center;"></div>
+  </div>`;
+}
+function drawAuditRows(){
+  const tb = document.getElementById('auditTbody'); if(!tb) return;
+  tb.innerHTML = auditState.rows.map((r,i)=>`<tr>
+    <td>${fmtDateTime(r.at)}</td>
+    <td>${esc(r.actor)}${r.auth_uid?' <span title="عملية من حساب الإدارة الموثّق">🔐</span>':''}<div class="muted">${roleLabel(r.role)}</div></td>
+    <td>${esc(ACTION_LABELS[r.action]||r.action)}</td>
+    <td>${esc(r.summary)}</td>
+    <td>${r.details?`<button class="small secondary" onclick="showAuditDetails(${i})">تفاصيل</button>`:''}</td></tr>`).join('')
+    || '<tr><td colspan="5" class="empty">'+(auditState.loading?'جارِ التحميل...':'لا توجد عمليات مطابقة')+'</td></tr>';
+  const f = document.getElementById('auditFooter'); if(!f) return;
+  if(auditState.error){
+    f.innerHTML = '<span style="color:var(--danger)">تعذر تحميل السجل: '+esc(auditState.error)+'</span><div class="hint">لو هذه أول مرة، شغّل ملف migration_7_phase2.sql في Supabase.</div>';
+  } else if(auditState.loading){ f.textContent = 'جارِ التحميل...'; }
+  else if(!auditState.done){ f.innerHTML = '<button class="secondary" onclick="loadAuditLog(false)">تحميل المزيد</button> <span class="muted">('+auditState.rows.length+' عملية معروضة)</span>'; }
+  else { f.innerHTML = '<span class="muted">'+auditState.rows.length+' عملية</span>'; }
+}
+async function loadAuditLog(reset){
+  if(auditState.loading) return;
+  if(reset) auditState = {rows:[], done:false, loading:false, error:null};
+  auditState.loading = true; drawAuditRows();
+  try{
+    const from = auditState.rows.length;
+    const {data, error} = await auditQuery().range(from, from+AUDIT_PAGE-1);
+    if(error) throw error;
+    auditState.rows = auditState.rows.concat(data||[]);
+    if(!data || data.length<AUDIT_PAGE) auditState.done = true;
+  }catch(e){ auditState.error = e.message || String(e); }
+  auditState.loading = false; drawAuditRows();
+}
+function applyAuditFilters(){
+  const f = getDate('auFrom'), t = getDate('auTo');
+  if(f===null || t===null){ alert('اكتب التاريخ بالشكل: يوم/شهر/سنة مثال 25/09/2026'); return; }
+  if(f && t && f>t){ alert('تاريخ البداية يجب أن يكون قبل تاريخ النهاية'); return; }
+  auditFilters = {from:f, to:t, action:document.getElementById('auAction').value, actor:document.getElementById('auActor').value.trim(), q:document.getElementById('auQ').value.trim()};
+  formDirty = false;
+  loadAuditLog(true);
+}
+function resetAuditFilters(){
+  auditFilters = {from:'', to:'', action:'', actor:'', q:''};
+  render(); loadAuditLog(true);
+}
+function showAuditDetails(i){
+  const r = auditState.rows[i]; if(!r) return;
+  const modal = document.createElement('div'); modal.className = 'modal-bg';
+  modal.innerHTML = `<div class="modal"><button class="closebtn" onclick="this.closest('.modal-bg').remove()">✕</button>
+    <h2>${esc(ACTION_LABELS[r.action]||r.action)}</h2>
+    <div class="muted">${fmtDateTime(r.at)} — ${esc(r.actor)} (${roleLabel(r.role)})${r.auth_uid?' 🔐':''}</div>
+    <p>${esc(r.summary)}</p>
+    <pre style="direction:ltr;text-align:left;white-space:pre-wrap;background:var(--surface-2);padding:10px;border-radius:8px;font-size:12px;">${esc(JSON.stringify(r.details,null,2))}</pre></div>`;
+  document.body.appendChild(modal);
+}
+async function exportAuditExcel(){
+  try{
+    const rows = [];
+    for(let from=0; rows.length<20000; from+=1000){
+      const {data, error} = await auditQuery().range(from, from+999);
+      if(error) throw error;
+      rows.push(...(data||[]));
+      if(!data || data.length<1000) break;
+    }
+    const sheet = rows.map(r=>({'الوقت':fmtDateTime(r.at), 'المنفّذ':r.actor, 'الدور':roleLabel(r.role), 'موثّق':r.auth_uid?'نعم':'', 'العملية':ACTION_LABELS[r.action]||r.action, 'الوصف':r.summary, 'كود المعدة':r.equipment_code||'', 'تفاصيل':r.details?JSON.stringify(r.details):''}));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(sheet), 'سجل العمليات');
+    XLSX.writeFile(wb, 'سجل_العمليات_'+new Date().toISOString().slice(0,10)+'.xlsx');
+  }catch(e){ alert('تعذر التصدير: '+(e.message||e)); }
+}
+async function loadEquipmentAudit(code, modal){
+  const box = modal.querySelector('#eqAuditBox'); if(!box) return;
+  try{
+    const {data, error} = await sb.from('audit_log').select('*').eq('equipment_code', code).order('at', {ascending:false}).limit(30);
+    if(error) throw error;
+    box.innerHTML = (data && data.length) ? data.map(r=>`<div class="tl-item"><div>${esc(ACTION_LABELS[r.action]||r.action)} <span class="muted">${fmtDateTime(r.at)}</span></div><div class="muted">${esc(r.actor)} — ${esc(r.summary)}</div></div>`).join('') : '<div class="muted">لا توجد عمليات مسجلة بعد.</div>';
+  }catch(e){ box.innerHTML = '<div class="muted">سجل العمليات غير متاح بعد (شغّل migration_7_phase2.sql).</div>'; }
+}
+
 // ---------- النسخ الاحتياطي ----------
 async function downloadBackup(kind){
   try{
@@ -1631,6 +1849,7 @@ async function downloadBackup(kind){
       XLSX.writeFile(wb, 'نسخة_احتياطية_'+stamp+'.xlsx');
     }
     localStorage.setItem('eq_last_backup', new Date().toISOString());
+    logAction('backup.download','backup',null,'تنزيل نسخة احتياطية ('+kind+'): '+eq.length+' معدة، '+tr.length+' طلب نقل',{kind},null);
     alert('تم إنشاء النسخة الاحتياطية: '+eq.length+' معدة، '+tr.length+' طلب نقل.');
     render();
   }catch(e){
@@ -1716,6 +1935,7 @@ async function confirmImport(){
     if(newProjects.length){
       await sb.from('projects').upsert(newProjects.map(name=>({name})), {onConflict:'name'});
     }
+    logAction('equipment.import','equipment',null,'استيراد معدات من ملف Excel: '+pendingImportRows.length+' صف',{count:pendingImportRows.length},null);
     pendingImportRows = null;
     await fetchAll();
     prevBox.innerHTML = '<div class="muted" style="color:var(--ok);margin-top:10px;">✅ تم الاستيراد بنجاح.</div>';
@@ -1746,6 +1966,7 @@ async function addEquipment(){
   };
   const {error} = await sb.from('equipment').insert(payload);
   if(error){ alert('حدث خطأ: '+error.message+ (error.message.includes('duplicate')?' (كود المعدة مستخدم من قبل، وربما تكون مؤرشفة في الأرشيف)':'')); return; }
+  logAction('equipment.add','equipment',code,'إضافة معدة جديدة: '+name+' ('+code+') في '+project,{status:payload.status}, code);
   alert('تمت إضافة المعدة بنجاح');
   await fetchAll(); render();
 }
@@ -1799,8 +2020,12 @@ async function saveEditEquipment(code, btn){
     eng: document.getElementById('editEng').value.trim(),
     driver: document.getElementById('editDriver').value.trim()
   };
+  const before = equipmentMap[code] || {};
+  const labels = {name:'الاسم', brand:'الماركة', model:'الموديل', year:'سنة الصنع', project:'الموقع', status:'الحالة', chassis:'الشاسيه', eng:'الموتور', driver:'السائق'};
+  const changes = Object.keys(labels).filter(k=>String(before[k]||'') !== String(patch[k]||'')).map(k=>({field:labels[k], from:before[k]||'', to:patch[k]||''}));
   const {error} = await sb.from('equipment').update(patch).eq('code', code);
   if(error){ alert('حدث خطأ: '+error.message); return; }
+  if(changes.length) logAction('equipment.edit','equipment',code,'تعديل بيانات المعدة '+(patch.name||code)+' ('+code+'): '+changes.map(c=>c.field).join('، '),{changes}, code);
   btn.closest('.modal-bg').remove();
   await fetchAll(); render();
 }
@@ -1814,6 +2039,7 @@ async function archiveEquipment(code){
     alert('تعذرت الأرشفة. تأكد من تشغيل ملف migration_6_phase1.sql في Supabase مرة واحدة، ومن تسجيل الدخول كإدارة.');
     return;
   }
+  logAction('equipment.archive','equipment',code,'أرشفة المعدة '+((equipmentMap[code]||{}).name||'')+' ('+code+')',null, code);
   await fetchAll(); render();
 }
 async function restoreEquipment(code){
@@ -1821,6 +2047,7 @@ async function restoreEquipment(code){
     .update({archived:false, archived_at:null, archived_by:null})
     .eq('code', code).select('code');
   if(error || !data || !data.length){ alert('تعذر الاسترجاع: '+(error? error.message : 'غير مصرح')); return; }
+  logAction('equipment.restore','equipment',code,'استرجاع المعدة '+((equipmentMap[code]||{}).name||'')+' ('+code+') من الأرشيف',null, code);
   await fetchAll(); render();
 }
 async function addProject(){
@@ -1829,12 +2056,14 @@ async function addProject(){
   const {error} = await sb.from('projects').upsert({name}, {onConflict:'name'});
   if(error){ alert('حدث خطأ: '+error.message); return; }
   document.getElementById('newProjName').value='';
+  logAction('project.add','project',name,'إضافة مشروع: '+name,null,null);
   await fetchAll(); render();
 }
 async function deleteProject(name){
   if(!confirm('حذف "'+name+'" من قائمة المشاريع؟')) return;
   const {error} = await sb.from('projects').delete().eq('name', name);
   if(error){ alert('حدث خطأ: '+error.message); return; }
+  logAction('project.delete','project',name,'حذف مشروع من القائمة: '+name,null,null);
   await fetchAll(); render();
 }
 
@@ -1842,6 +2071,7 @@ async function deleteProject(name){
 function attachHandlers(){
   renderNotifBell();
   if(document.getElementById('emailUsage')) loadEmailUsage();
+  if(document.getElementById('auditTbody')) drawAuditRows();
   if(document.getElementById('wsEqBody')) fillWorkshopEq();
   document.querySelectorAll('select.searchable').forEach(enhanceSearchable);
   if(currentTab==='reports'){ setTimeout(initReportCharts, 0); } else { destroyCharts(); }
@@ -1963,6 +2193,7 @@ async function submitNewTransfer(){
       );
     }catch(mailErr){ console.warn('email notify failed (ignored)', mailErr); }
     alert('تم إرسال طلب النقل بنجاح، بانتظار موافقة الإدارة.');
+    logAction('transfer.create','transfer',null,'طلب نقل ('+typeLabel(type)+') للمعدة '+eq.name+' ('+eq.code+') من '+eq.project+' إلى '+dest,{type, from:eq.project, to:dest, mission_end:payload.mission_end_date||null}, eq.code);
     await fetchAll();
     setTab('transfers');
   }catch(e){
@@ -1990,6 +2221,12 @@ window.saveEditEquipment = saveEditEquipment;
 window.archiveEquipment = archiveEquipment;
 window.restoreEquipment = restoreEquipment;
 window.downloadBackup = downloadBackup;
+window.applyAuditFilters = applyAuditFilters;
+window.resetAuditFilters = resetAuditFilters;
+window.loadAuditLog = loadAuditLog;
+window.showAuditDetails = showAuditDetails;
+window.exportAuditExcel = exportAuditExcel;
+window.render = render;
 window.addProject = addProject;
 window.deleteProject = deleteProject;
 window.handleImportFile = handleImportFile;
