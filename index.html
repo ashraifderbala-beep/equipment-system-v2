@@ -8,6 +8,7 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
 <script src="config.js"></script>
 <style>
 :root{
@@ -245,6 +246,7 @@ document.addEventListener('input', function(e){
 });
 
 let currentUser = JSON.parse(localStorage.getItem('eq_user')||'null');
+let loggingOut = false, loginNotice = '';
 let equipmentMap = {};
 let transfersMap = {};
 let currentTab = 'dashboard';
@@ -316,7 +318,8 @@ function trFromRow(r){
     accessories:r.accessories, missionEndDate:r.mission_end_date, inspectionFormUrl:r.inspection_form_url,
     entryDate:r.entry_date, exitDate:r.exit_date, workDone:r.work_done, workShouldBeDone:r.work_should_be_done,
     technicalNotes:r.technical_notes, invoices:r.invoices||[], labor:r.labor||[], parts:r.parts||[],
-    reportLocked:r.report_locked||false, lockedBy:r.locked_by, lockedAt:r.locked_at};
+    reportLocked:r.report_locked||false, lockedBy:r.locked_by, lockedAt:r.locked_at,
+    serial:r.serial, receivedAt:r.received_at, receivedBy:r.received_by, receiptCondition:r.receipt_condition, receiptNotes:r.receipt_notes, receiptPhotoUrl:r.receipt_photo_url};
 }
 async function ensureSeed(){
   const {count, error} = await sb.from('equipment').select('*', {count:'exact', head:true});
@@ -400,7 +403,7 @@ async function once(key, fn){
 // ---------- سجل العمليات (Audit Log) ----------
 const ACTION_LABELS = {
   'transfer.create':'إنشاء طلب نقل', 'transfer.approve':'اعتماد نقل', 'transfer.reject':'رفض نقل',
-  'transfer.approve_return':'اعتماد عودة معدة', 'workshop.save':'حفظ تقرير ورشة', 'workshop.finish':'إنهاء إصلاح / طلب عودة',
+  'transfer.approve_return':'اعتماد عودة معدة', 'transfer.receive':'تأكيد استلام معدة', 'workshop.save':'حفظ تقرير ورشة', 'workshop.finish':'إنهاء إصلاح / طلب عودة',
   'report.unlock':'فتح قفل تقرير', 'equipment.add':'إضافة معدة', 'equipment.edit':'تعديل معدة', 'equipment.status':'تغيير حالة معدة',
   'equipment.archive':'أرشفة معدة', 'equipment.restore':'استرجاع معدة', 'equipment.import':'استيراد معدات',
   'project.add':'إضافة مشروع', 'project.delete':'حذف مشروع', 'backup.download':'نسخة احتياطية', 'auth.login':'تسجيل دخول'
@@ -476,12 +479,15 @@ function detectTransferNotifications(oldMap, newMap){
       }
       return;
     }
+    if(!old.receivedAt && t.receivedAt && currentUser.role==='admin'){
+      addNotification(`📦 تم تأكيد استلام المعدة ${t.equipmentName} في ${t.toLocation}`, 'transfers');
+    }
     if(old.status===t.status) return;
     if(t.status==='in_workshop' && isExternalRepair(t) && isMe(t.fromLocation)){
       addNotification(`✅ تمت الموافقة على إرسال المعدة للورشة الخارجية: ${t.equipmentName}. بعد عودتها سجّل الفواتير من تبويب إصلاحات الورش الخارجية`, 'external');
     }
     if((t.status==='approved' || t.status==='in_workshop') && isMe(t.toLocation)){
-      addNotification(`✅ تمت الموافقة على استلام معدة: ${t.equipmentName}`, 'transfers');
+      addNotification(`✅ تمت الموافقة على استلام معدة: ${t.equipmentName}`+((t.transferType==='permanent'||t.transferType==='mission')?' — افتح "طلباتي" لتأكيد الاستلام':''), 'transfers');
     }
     if(t.status==='rejected' && isMe(t.fromLocation)){
       addNotification(`❌ تم رفض طلب نقل: ${t.equipmentName}`, 'transfers');
@@ -564,6 +570,15 @@ async function init(){
     app.innerHTML = '<div class="card empty">تعذر تهيئة الاتصال بقاعدة البيانات. تأكد من بيانات الاتصال داخل ملف config.js.</div>';
     return;
   }
+  if(currentUser && currentUser.role==='admin'){
+    // الإدارة تعتمد على جلسة موثّقة: لو لم تعد صالحة نعيد المستخدم لشاشة الدخول بدل أن يبدو مسجّلاً وهو غير مصرّح
+    let has = false;
+    try{ const {data} = await sb.auth.getSession(); has = !!(data && data.session); }catch(e){}
+    if(!has){
+      localStorage.removeItem('eq_user'); currentUser = null;
+      loginNotice = 'انتهت جلسة الإدارة على هذا الجهاز. سجّل الدخول بكلمة مرور الإدارة من جديد.';
+    }
+  }
   if(!currentUser){
     try{
       const {data} = await sb.from('projects').select('*');
@@ -573,11 +588,21 @@ async function init(){
     return;
   }
   app.innerHTML = '<div class="empty">جارِ تحميل البيانات...</div>';
+  if(currentUser.role==='admin'){
+    sb.auth.onAuthStateChange((event)=>{
+      if(event==='SIGNED_OUT' && !loggingOut){
+        localStorage.removeItem('eq_user');
+        alert('انتهت جلسة الإدارة (ربما تم تسجيل الخروج من جهاز آخر). سجّل الدخول من جديد.');
+        location.reload();
+      }
+    });
+  }
   try{
     try{ await ensureSeed(); }catch(seedErr){ console.warn('seed skipped', seedErr); }
     await fetchAll();
     subscribeRealtime();
     render();
+    openTransferFromHash();
   }catch(e){
     console.error(e);
     app.innerHTML = '<div class="card empty">تعذر الاتصال بقاعدة البيانات. تحقق من إعدادات SUPABASE_URL / ANON_KEY وسياسات RLS.</div>';
@@ -609,6 +634,7 @@ function renderLogin(){
     document.getElementById('adminPassWrap').style.display = e.target.value===ADMIN_NAME ? '' : 'none';
   });
   enhanceSearchable(document.getElementById('loginSel'));
+  if(loginNotice){ document.getElementById('loginErr').textContent = loginNotice; loginNotice = ''; }
   document.getElementById('loginBtn').onclick = async ()=>{
     const v = document.getElementById('loginSel').value;
     const errBox = document.getElementById('loginErr');
@@ -628,7 +654,16 @@ function renderLogin(){
     location.reload();
   };
 }
-async function logout(){ try{ await sb.auth.signOut(); }catch(e){} localStorage.removeItem('eq_user'); location.reload(); }
+// scope:'local' = الخروج من هذا الجهاز فقط (الافتراضي في Supabase يُخرج الحساب من كل الأجهزة!)
+async function logout(){ loggingOut = true; try{ await sb.auth.signOut({scope:'local'}); }catch(e){} localStorage.removeItem('eq_user'); location.reload(); }
+// يتأكد أن جلسة الإدارة الموثّقة ما زالت صالحة قبل أي عملية كتابة
+async function ensureAdminSession(){
+  if(!currentUser || currentUser.role!=='admin') return true;
+  try{ const {data} = await sb.auth.getSession(); if(data && data.session) return true; }catch(e){}
+  alert('انتهت جلسة الإدارة على هذا الجهاز، لذلك لا يمكن تنفيذ الاعتماد أو التعديل. سجّل الدخول من جديد بكلمة مرور الإدارة.');
+  localStorage.removeItem('eq_user'); location.reload();
+  return false;
+}
 
 // ---------- MAIN RENDER ----------
 function render(){
@@ -708,6 +743,7 @@ function renderDashboard(){
       [allEq.filter(isActiveEq).length,'إجمالي المعدات (بدون المكهن)'],
       [allEq.filter(e=>isActiveEq(e) && e.locationType && e.locationType.startsWith('workshop')).length,'معدات داخل الورش حالياً'],
       [tr.filter(t=>t.status==='pending').length,'طلبات نقل قيد الموافقة'],
+      [tr.filter(needsReceipt).length,'معتمدة بانتظار استلام المشروع'],
       [tr.length,'إجمالي عمليات النقل المسجلة']
     ];
   } else if(role==='workshop'){
@@ -722,6 +758,7 @@ function renderDashboard(){
       [eq.filter(isActiveEq).length,'معدات مشروعي'],
       [tr.filter(t=>t.fromLocation===me && t.transferType==='repair' && away.includes(t.status)).length,'معدات مرسلة للإصلاح حالياً'],
       [tr.filter(t=>t.fromLocation===me && t.status==='pending').length,'طلبات نقل قيد الموافقة'],
+      [tr.filter(t=>needsReceipt(t) && t.toLocation===me).length,'بانتظار تأكيد استلامك'],
       [tr.length,'إجمالي عمليات النقل']
     ];
   }
@@ -934,25 +971,136 @@ function renderTransfersList(){
   <div id="trList">${renderTransferCards(list)}</div>`;
 }
 function trFilterLabel(s){ return {all:'الكل',pending:'قيد الانتظار',approved:'معتمد',in_workshop:'داخل الورشة',ready_return:'جاهز للعودة',rejected:'مرفوض',completed:'مكتمل'}[s]; }
+// ---------- التسليم والاستلام وإذن النقل ----------
+function slipNo(t){ return t.serial ? 'T-'+String(t.serial).padStart(5,'0') : '—'; }
+function needsReceipt(t){ return (t.transferType==='permanent' || t.transferType==='mission') && t.status==='approved' && !t.receivedAt; }
+function canConfirmReceipt(t){ return needsReceipt(t) && (currentUser.role==='admin' || isMe(t.toLocation)); }
+function receiptBadge(t){
+  if(t.receivedAt) return '<span class="badge b-approved">تم الاستلام ✅</span>';
+  if(needsReceipt(t)) return '<span class="badge b-pending">بانتظار الاستلام ⏳</span>';
+  return '';
+}
 function renderTransferCards(list){
   if(!list.length) return '<div class="card empty">لا توجد طلبات نقل</div>';
   return list.map(t=>`
     <div class="card">
       <div class="top" style="margin-bottom:6px;">
-        <div><b>${esc(t.equipmentName)}</b> <span class="muted">(${esc(t.equipmentCode)})</span> - ${typeLabel(t.transferType)}</div>
-        ${transferStatusBadge(t)}
+        <div><b>${esc(t.equipmentName)}</b> <span class="muted">(${esc(t.equipmentCode)})</span> - ${typeLabel(t.transferType)} <span class="muted">• إذن ${slipNo(t)}</span></div>
+        <div>${transferStatusBadge(t)} ${receiptBadge(t)}</div>
       </div>
       <div class="muted">من: ${esc(t.fromLocation)} ← إلى: ${esc(t.toLocation)} | بواسطة: ${esc(t.requestedBy)} | ${fmtDateTime(t.requestedAt)}</div>
       ${t.approvalNotes ? `<div class="muted">ملاحظات الإدارة: ${esc(t.approvalNotes)}</div>` : ''}
-      <button class="small secondary noprint" style="margin-top:8px;" onclick="openTransferDetail('${t.id}')">عرض التفاصيل</button>
+      <div class="row noprint" style="margin-top:8px;gap:8px;">
+        <button class="small secondary" style="flex:0 0 auto;" onclick="openTransferDetail('${t.id}')">عرض التفاصيل</button>
+        <button class="small secondary" style="flex:0 0 auto;" onclick="openTransferSlip('${t.id}')">🖨️ إذن النقل</button>
+        ${canConfirmReceipt(t) ? `<button class="small" style="flex:0 0 auto;" onclick="openReceiptModal('${t.id}')">📦 تأكيد الاستلام</button>` : ''}
+      </div>
     </div>`).join('');
 }
+function openReceiptModal(id){
+  const t = transfersMap[id]; if(!t || !canConfirmReceipt(t)) return;
+  const modal = document.createElement('div'); modal.className = 'modal-bg';
+  modal.innerHTML = `<div class="modal"><button class="closebtn" onclick="this.closest('.modal-bg').remove()">✕</button>
+    <h2>📦 تأكيد استلام معدة</h2>
+    <div><b>${esc(t.equipmentName)}</b> (${esc(t.equipmentCode)}) — من ${esc(t.fromLocation)} إلى ${esc(t.toLocation)}</div>
+    <label>تاريخ الاستلام <span class="req">*</span></label>${dateField('rcDate', localISODate(new Date().toISOString()))}
+    <label>حالة المعدة عند الاستلام <span class="req">*</span></label>
+    <select id="rcCond"><option value="good">سليمة ومطابقة لما ورد في الإذن</option><option value="notes">بها ملاحظات / نقص (اكتبها أدناه)</option></select>
+    <label>ملاحظات الاستلام (إلزامية لو توجد ملاحظات)</label><textarea id="rcNotes"></textarea>
+    <label>صورة عند الاستلام (اختياري)</label><input type="file" id="rcPhoto" accept="image/*">
+    <div class="row" style="margin-top:12px;"><button onclick="saveReceipt('${id}', this)">تأكيد الاستلام</button><button class="secondary" onclick="this.closest('.modal-bg').remove()">إلغاء</button></div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+function saveReceipt(id, btn){ return once('receipt:'+id, ()=>saveReceiptImpl(id, btn)); }
+async function saveReceiptImpl(id, btn){
+  const t = transfersMap[id]; if(!t) return;
+  const d = getDate('rcDate');
+  const cond = document.getElementById('rcCond').value;
+  const notes = document.getElementById('rcNotes').value.trim();
+  if(!d){ alert('اكتب تاريخ الاستلام بالشكل: يوم/شهر/سنة مثال 25/09/2026'); return; }
+  if(cond==='notes' && !notes){ alert('اكتب الملاحظات أو النقص الذي لاحظته'); return; }
+  btn.disabled = true;
+  try{
+    let photo = null;
+    const f = document.getElementById('rcPhoto').files[0];
+    if(f) photo = await uploadFile(f, 'receipts');
+    const patch = {received_at: new Date(d+'T12:00:00').toISOString(), received_by: currentUser.name,
+      receipt_condition: cond==='good' ? 'سليمة' : 'بها ملاحظات', receipt_notes: notes || null, receipt_photo_url: photo};
+    const {data, error} = await sb.from('transfers').update(patch).eq('id', id).is('received_at', null).select('id');
+    if(error) throw error;
+    if(!data || !data.length){ alert('تم تأكيد استلام هذه المعدة مسبقاً.'); btn.closest('.modal-bg').remove(); await fetchAll(); render(); return; }
+    logAction('transfer.receive','transfer',id,'تأكيد استلام المعدة '+t.equipmentName+' ('+t.equipmentCode+') في '+t.toLocation+' — الحالة: '+patch.receipt_condition,{condition:patch.receipt_condition, notes, date:d}, t.equipmentCode);
+    btn.closest('.modal-bg').remove();
+    await fetchAll(); render();
+  }catch(e){
+    console.error(e); btn.disabled = false;
+    alert('تعذر حفظ الاستلام: '+(e.message||e)+'\nتأكد من تشغيل ملف migration_8_phase3.sql في Supabase مرة واحدة.');
+  }
+}
+function qrSvg(text){
+  try{
+    if(typeof qrcode==='undefined') return '';
+    const qr = qrcode(0,'M'); qr.addData(text); qr.make();
+    return qr.createSvgTag({cellSize:3, margin:0, scalable:true});
+  }catch(e){ return ''; }
+}
+function transferLink(id){ return location.origin + location.pathname + '#t=' + id; }
+function openTransferFromHash(){
+  const m = /^#t=([0-9a-fA-F-]{36})$/.exec(location.hash||'');
+  if(!m) return;
+  try{ history.replaceState(null, '', location.pathname + location.search); }catch(e){}
+  const t = transfersMap[m[1]]; if(!t) return;
+  const me = currentUser.name;
+  if(currentUser.role==='admin' || t.fromLocation===me || t.toLocation===me) openTransferDetail(t.id);
+}
+function openTransferSlip(id){
+  const t = transfersMap[id]; if(!t) return;
+  const e = equipmentMap[t.equipmentCode] || {};
+  const qr = qrSvg(transferLink(id));
+  const st = {pending:'⚠️ غير معتمد بعد (بانتظار الإدارة)', rejected:'❌ مرفوض من الإدارة'}[t.status] || '';
+  const cell = (label, val) => `<td style="border:1px solid #999;padding:6px 8px;width:50%;"><span style="color:#555;font-size:12px;">${label}</span><br><b>${val||'—'}</b></td>`;
+  const sig = label => `<td style="border:1px solid #999;height:90px;vertical-align:top;padding:6px 8px;width:33%;"><span style="color:#555;font-size:12px;">${label}</span><br><br><span style="color:#777;font-size:12px;">الاسم: ................................<br><br>التوقيع: ..............................<br><br>التاريخ: ..............................</span></td>`;
+  const modal = document.createElement('div'); modal.className = 'modal-bg';
+  modal.innerHTML = `<div class="modal" style="background:#fff;color:#000;max-width:820px;">
+    <button class="closebtn noprint" onclick="this.closest('.modal-bg').remove()">✕</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;border-bottom:2px solid #000;padding-bottom:10px;">
+      <div>
+        <div style="font-size:22px;font-weight:700;">إذن نقل معدة</div>
+        <div style="color:#444;">نظام متابعة ونقل المعدات</div>
+        <div style="margin-top:6px;">رقم الإذن: <b>${slipNo(t)}</b> &nbsp;|&nbsp; نوع النقل: <b>${typeLabel(t.transferType)}</b></div>
+        <div>تاريخ الطلب: <b>${fmtDate(t.requestedAt)}</b> &nbsp;|&nbsp; بواسطة: <b>${esc(t.requestedBy)}</b></div>
+        ${st ? `<div style="margin-top:6px;color:#b00;font-weight:700;">${st}</div>` : ''}
+      </div>
+      ${qr ? `<div style="width:96px;flex:0 0 96px;">${qr}<div style="font-size:10px;text-align:center;color:#555;">امسح لفتح الطلب</div></div>` : ''}
+    </div>
+    <h3 style="margin:12px 0 6px;">بيانات المعدة</h3>
+    <table style="width:100%;border-collapse:collapse;"><tr>${cell('الكود', esc(t.equipmentCode))}${cell('الاسم', esc(t.equipmentName))}</tr>
+      <tr>${cell('الماركة / الموديل', esc((e.brand||'')+' / '+(e.model||'')))}${cell('سنة الصنع', esc(e.year))}</tr>
+      <tr>${cell('رقم الشاسيه', esc(e.chassis))}${cell('رقم الموتور', esc(e.eng))}</tr></table>
+    <h3 style="margin:12px 0 6px;">بيانات النقل</h3>
+    <table style="width:100%;border-collapse:collapse;"><tr>${cell('من', esc(t.fromLocation))}${cell('إلى', esc(t.toLocation))}</tr>
+      ${t.transferType==='mission' ? `<tr>${cell('تاريخ العودة المتوقع', esc(isoToDMY(t.missionEndDate)))}${cell('', '')}</tr>` : ''}</table>
+    <h3 style="margin:12px 0 6px;">الحالة الفنية عند النقل</h3>
+    <table style="width:100%;border-collapse:collapse;"><tr>${cell('آخر صيانة', esc(isoToDMY(t.lastMaintenanceDate)))}${cell('عداد الصيانة', esc(t.lastMaintenanceMeter))}</tr>
+      <tr>${cell('آخر فلتر تم تغييره', esc(t.lastFilterChanged))}${cell('مشتملات المعدة', esc(t.accessories))}</tr>
+      ${t.transferType==='permanent' ? `<tr><td colspan="2" style="border:1px solid #999;padding:6px 8px;"><span style="color:#555;font-size:12px;">قطع الغيار والفلاتر المرسلة مع المعدة</span><br><b>${esc(t.partsAndSpares)||'—'}</b></td></tr>` : ''}</table>
+    <h3 style="margin:12px 0 6px;">الاعتماد والاستلام</h3>
+    <table style="width:100%;border-collapse:collapse;"><tr>${cell('اعتماد الإدارة', t.approvedBy && t.status!=='rejected' ? esc(t.approvedBy)+' — '+fmtDate(t.approvedAt) : 'لم يُعتمد بعد')}${cell('الاستلام', t.receivedAt ? 'تم بتاريخ '+fmtDate(t.receivedAt)+' بواسطة '+esc(t.receivedBy) : 'لم يُؤكَّد بعد')}</tr>
+      ${t.receivedAt ? `<tr>${cell('حالة المعدة عند الاستلام', esc(t.receiptCondition))}${cell('ملاحظات الاستلام', esc(t.receiptNotes))}</tr>` : ''}</table>
+    <table style="width:100%;border-collapse:collapse;margin-top:14px;"><tr>${sig('المرسل')}${sig('المستلم')}${sig('الإدارة')}</tr></table>
+    <div style="margin-top:10px;font-size:11px;color:#666;">طُبع بتاريخ ${fmtDateTime(new Date().toISOString())}</div>
+    <div class="row noprint" style="margin-top:12px;"><button onclick="printModal()">🖨️ طباعة</button></div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
 function openTransferDetail(id){
   const t = transfersMap[id]; if(!t) return;
   const modal = document.createElement('div'); modal.className='modal-bg';
   modal.innerHTML = `<div class="modal"><button class="closebtn noprint" onclick="this.closest('.modal-bg').remove()">✕</button>
    <h2>${esc(t.equipmentName)} <span class="muted">(${esc(t.equipmentCode)})</span></h2>
-   <div>${transferStatusBadge(t)} <span class="muted">${typeLabel(t.transferType)}</span></div>
+   <div>${transferStatusBadge(t)} ${receiptBadge(t)} <span class="muted">${typeLabel(t.transferType)} • إذن ${slipNo(t)}</span></div>
    <div class="row"><div><b>من:</b> ${esc(t.fromLocation)}</div><div><b>إلى:</b> ${esc(t.toLocation)}</div></div>
    <div class="row"><div><b>بواسطة:</b> ${esc(t.requestedBy)}</div><div><b>بتاريخ:</b> ${fmtDateTime(t.requestedAt)}</div></div>
    <div class="section-title">بيانات فنية عند النقل</div>
@@ -978,7 +1126,12 @@ function openTransferDetail(id){
      ${currentUser.role==='admin' ? `<div class="row noprint" style="margin-top:8px;"><button class="secondary small" onclick="unlockReport('${t.id}')">فتح القفل للتعديل (للإدارة فقط)</button></div>` : ''}
    </div>` : ''}
    ` : ''}
-   <div class="row noprint" style="margin-top:12px;"><button class="secondary" onclick="printModal()">🖨️ طباعة هذا التقرير</button></div>
+   ${(t.receivedAt || needsReceipt(t)) ? `<div class="section-title">الاستلام</div>${t.receivedAt ? `<div><b>تم الاستلام:</b> ${fmtDate(t.receivedAt)} بواسطة ${esc(t.receivedBy)}</div><div><b>الحالة عند الاستلام:</b> ${esc(t.receiptCondition)||'—'}</div>${t.receiptNotes?`<div><b>ملاحظات:</b> ${esc(t.receiptNotes)}</div>`:''}${t.receiptPhotoUrl?`<img class="imgprev" src="${t.receiptPhotoUrl}">`:''}` : '<div class="muted">بانتظار تأكيد استلام المشروع المستقبل.</div>'}` : ''}
+   <div class="row noprint" style="margin-top:12px;">
+     <button class="secondary" onclick="printModal()">🖨️ طباعة هذا التقرير</button>
+     <button class="secondary" onclick="openTransferSlip('${t.id}')">🖨️ إذن النقل (بـ QR)</button>
+     ${canConfirmReceipt(t) ? `<button onclick="this.closest('.modal-bg').remove();openReceiptModal('${t.id}')">📦 تأكيد الاستلام</button>` : ''}
+   </div>
    </div>`;
   document.body.appendChild(modal);
 }
@@ -1006,6 +1159,7 @@ function renderApprovals(){
     </div>`).join('');
 }
 async function unlockReport(id){
+  if(!(await ensureAdminSession())) return;
   if(!confirm('فتح القفل يسمح بتعديل بيانات العمالة والقطع لهذا التقرير مرة أخرى. متابعة؟')) return;
   const {error} = await sb.from('transfers').update({report_locked:false}).eq('id', id);
   if(error){ alert('حدث خطأ: '+error.message); return; }
@@ -1026,6 +1180,7 @@ async function claimTransfer(id, expectedStatus, patch){
   return true;
 }
 async function decideTransferImpl(id, approve){
+  if(!(await ensureAdminSession())) return;
   const t = transfersMap[id]; if(!t) return;
   const notes = document.getElementById('notes_'+id)?.value.trim() || '';
   if(!approve && !notes){ alert('يرجى كتابة سبب الرفض'); return; }
@@ -1059,13 +1214,13 @@ async function decideTransferImpl(id, approve){
   const claimed = await claimTransfer(id, t.status, trPatch);
   if(!claimed) return;
   // 2) نقل المعدة، ولو فشل نتراجع عن الحجز حتى لا يبقى الطلب معتمداً بدون انتقال فعلي
-  const {error:e1} = await sb.from('equipment').update({
+  const {data:eqUpd, error:e1} = await sb.from('equipment').update({
     project: destLocation, location_type: destType, status: newStatus,
     transfer_count: (eqData.transferCount||0)+1, last_move_at: nowIso
-  }).eq('code', t.equipmentCode);
-  if(e1){
+  }).eq('code', t.equipmentCode).select('code');
+  if(e1 || !eqUpd || !eqUpd.length){
     await sb.from('transfers').update(prev).eq('id', id);
-    alert('تعذر تحديث بيانات المعدة (تأكد من تسجيل الدخول كإدارة). تم التراجع عن الاعتماد: '+e1.message);
+    alert('تعذر تحديث بيانات المعدة (لا توجد صلاحية أو انتهت الجلسة). تم التراجع عن الاعتماد: '+(e1 ? e1.message : 'لم يُعدَّل أي صف'));
     await fetchAll(); render(); return;
   }
   logAction(isReturn ? 'transfer.approve_return' : 'transfer.approve', 'transfer', id,
@@ -1917,6 +2072,7 @@ function handleImportFile(){
   reader.readAsArrayBuffer(file);
 }
 async function confirmImport(){
+  if(!(await ensureAdminSession())) return;
   if(!pendingImportRows || !pendingImportRows.length){ alert('لا توجد بيانات جاهزة للاستيراد'); return; }
   const prevBox = document.getElementById('importPreview');
   prevBox.innerHTML = '<div class="muted" style="margin-top:10px;">جارِ الاستيراد... قد يستغرق دقيقة حسب عدد المعدات.</div>';
@@ -1947,6 +2103,7 @@ async function confirmImport(){
 }
 
 async function addEquipment(){
+  if(!(await ensureAdminSession())) return;
   const code = document.getElementById('addCode').value.trim();
   const name = document.getElementById('addName').value.trim();
   if(!code || !name){ alert('كود المعدة واسمها إلزاميان'); return; }
@@ -2008,6 +2165,7 @@ function openEditEquipment(code){
   document.body.appendChild(modal);
 }
 async function saveEditEquipment(code, btn){
+  if(!(await ensureAdminSession())) return;
   const patch = {
     name: document.getElementById('editName').value.trim(),
     brand: document.getElementById('editBrand').value.trim(),
@@ -2023,13 +2181,15 @@ async function saveEditEquipment(code, btn){
   const before = equipmentMap[code] || {};
   const labels = {name:'الاسم', brand:'الماركة', model:'الموديل', year:'سنة الصنع', project:'الموقع', status:'الحالة', chassis:'الشاسيه', eng:'الموتور', driver:'السائق'};
   const changes = Object.keys(labels).filter(k=>String(before[k]||'') !== String(patch[k]||'')).map(k=>({field:labels[k], from:before[k]||'', to:patch[k]||''}));
-  const {error} = await sb.from('equipment').update(patch).eq('code', code);
+  const {data:upd, error} = await sb.from('equipment').update(patch).eq('code', code).select('code');
   if(error){ alert('حدث خطأ: '+error.message); return; }
+  if(!upd || !upd.length){ alert('لم يتم حفظ التعديل (لا توجد صلاحية). سجّل الدخول من جديد بكلمة مرور الإدارة.'); return; }
   if(changes.length) logAction('equipment.edit','equipment',code,'تعديل بيانات المعدة '+(patch.name||code)+' ('+code+'): '+changes.map(c=>c.field).join('، '),{changes}, code);
   btn.closest('.modal-bg').remove();
   await fetchAll(); render();
 }
 async function archiveEquipment(code){
+  if(!(await ensureAdminSession())) return;
   if(!confirm('سيتم نقل هذه المعدة إلى الأرشيف وإخفاؤها من القوائم والأعداد. سجلها وتاريخ نقلها يبقيان محفوظين، ويمكنك استرجاعها في أي وقت من تبويب الإدارة. متابعة؟')) return;
   const {data, error} = await sb.from('equipment')
     .update({archived:true, archived_at:new Date().toISOString(), archived_by:currentUser.name})
@@ -2043,6 +2203,7 @@ async function archiveEquipment(code){
   await fetchAll(); render();
 }
 async function restoreEquipment(code){
+  if(!(await ensureAdminSession())) return;
   const {data, error} = await sb.from('equipment')
     .update({archived:false, archived_at:null, archived_by:null})
     .eq('code', code).select('code');
@@ -2051,6 +2212,7 @@ async function restoreEquipment(code){
   await fetchAll(); render();
 }
 async function addProject(){
+  if(!(await ensureAdminSession())) return;
   const name = document.getElementById('newProjName').value.trim();
   if(!name){ alert('يرجى كتابة اسم المشروع'); return; }
   const {error} = await sb.from('projects').upsert({name}, {onConflict:'name'});
@@ -2060,9 +2222,11 @@ async function addProject(){
   await fetchAll(); render();
 }
 async function deleteProject(name){
+  if(!(await ensureAdminSession())) return;
   if(!confirm('حذف "'+name+'" من قائمة المشاريع؟')) return;
-  const {error} = await sb.from('projects').delete().eq('name', name);
+  const {data:delRows, error} = await sb.from('projects').delete().eq('name', name).select('name');
   if(error){ alert('حدث خطأ: '+error.message); return; }
+  if(!delRows || !delRows.length){ alert('لم يتم الحذف (لا توجد صلاحية). سجّل الدخول من جديد بكلمة مرور الإدارة.'); return; }
   logAction('project.delete','project',name,'حذف مشروع من القائمة: '+name,null,null);
   await fetchAll(); render();
 }
@@ -2227,6 +2391,9 @@ window.loadAuditLog = loadAuditLog;
 window.showAuditDetails = showAuditDetails;
 window.exportAuditExcel = exportAuditExcel;
 window.render = render;
+window.openReceiptModal = openReceiptModal;
+window.saveReceipt = saveReceipt;
+window.openTransferSlip = openTransferSlip;
 window.addProject = addProject;
 window.deleteProject = deleteProject;
 window.handleImportFile = handleImportFile;
